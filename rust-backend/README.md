@@ -54,7 +54,7 @@ cp .env.example .env
 cargo test
 ```
 
-10 個測試應全數通過。其中包含 RFC 4231 的 HMAC 已知答案測試(確保簽章正確),以及下單安全驗證測試。
+25 個測試應全數通過:RFC 4231 的 HMAC 已知答案測試(確保簽章正確)、下單安全驗證、指標正確性、以及設定檔解析。
 
 ### 步驟 4 — 啟動服務
 
@@ -131,6 +131,65 @@ MAX_ORDER_NOTIONAL_USDT=50
 特別要親身經歷一次連續虧損。連虧 16 筆時你會非常想關掉系統 —— 那才是真正的考驗。
 
 ---
+
+## 背景執行(關掉瀏覽器也繼續跑)
+
+儀表板關掉後 JS 引擎就停了。要讓機器人持續運作,用 daemon 模式。
+
+### 指令
+
+```bash
+quant-terminal-backend help      # 說明
+quant-terminal-backend serve     # 預設,給儀表板用的 HTTP API
+quant-terminal-backend check     # 驗證 config.json 並印出實際生效的設定
+quant-terminal-backend daemon    # 無頭執行策略,不需要瀏覽器
+quant-terminal-backend parity BTCUSDT 4h   # 印出指標值,供與網頁對拍
+```
+
+### 設定檔
+
+在儀表板「設定 → 4 · 設定儲存 → 匯出 config.json」,把檔案放到 `rust-backend/`。
+daemon 讀的就是這份,**你在網頁上調的參數和背景執行的完全一致**。
+
+先驗證:
+```bash
+cargo run --release -- check
+```
+
+### 啟動
+
+```bash
+cargo run --release -- daemon
+```
+
+Windows 背景執行:
+```powershell
+Start-Process -WindowStyle Hidden ".\target\release\quant-terminal-backend.exe" -ArgumentList "daemon"
+elease\quant-terminal-backend.exe" -ArgumentList "daemon"
+elease\quant-terminal-backend.exe -ArgumentList "daemon"
+```
+
+停止:`Ctrl-C`,或 `taskkill /F /IM quant-terminal-backend.exe`
+
+環境變數 `DAEMON_INTERVAL_SECS`(預設 60)控制評估間隔,`CONFIG_PATH` 可指定其他設定檔。
+
+### ⚠️ 只有 MACD 策略被移植
+
+daemon 目前**只跑 MACD + EMA120**。雙均線與七關趨勢法仍然只在瀏覽器裡執行。
+
+原因:七關法需要擺動點偵測與市場結構判讀,把那段邏輯用另一個語言重寫一次,
+一旦出現細微差異,**daemon 交易的就不是你回測過的策略** —— 而且不會有任何明顯徵兆。
+與其近似,不如先不做。設定檔裡若含這兩個策略,daemon 會印出警告並忽略它們。
+
+### 指標對拍
+
+已移植的指標與網頁版**逐位元一致**(BTCUSDT 4h、500 根 K 棒,7 項指標相對誤差 0.00e+0)。
+
+自己驗證:
+```bash
+cargo run --release -- parity BTCUSDT 4h
+```
+再到瀏覽器 Console 用同一份資料比對。改動任何指標後都該重跑這個。
 
 ## 端點
 

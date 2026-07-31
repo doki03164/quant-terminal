@@ -41,3 +41,4 @@ desktop.ini
 # Rust backend — .env holds live exchange API secrets
 rust-backend/.env
 rust-backend/target/
+rust-backend/config.json

@@ -2544,6 +2544,149 @@ function beStatusChip(){
   return '<span class="chip r">⚠ 實盤下單已啟用</span>';
 }
 
+/* ---------------------------------------------------------------- *
+ * 12f. 設定儲存 CONFIG PERSISTENCE
+ * ------------------------------------------------------------------
+ * Survives a page reload via localStorage, and exports the exact same
+ * JSON shape the Rust daemon reads — so what you tune here is what runs
+ * headless. API secrets are deliberately NOT persisted: the browser is
+ * not a safe place to keep them, and the daemon reads its own from .env.
+ * ---------------------------------------------------------------- */
+const CFG_KEY = "quant-terminal.cfg.v1";
+
+function cfgSnapshot(){
+  return {
+    version: 1,
+    saved_at: new Date().toISOString(),
+    risk: {
+      leverage: CFG.leverage,
+      risk_pct: CFG.riskPct,
+      min_rr: CFG.minRR,
+      sl_atr_mult: CFG.slAtrMult,
+      max_margin_use: CFG.maxMarginUse,
+      taker_fee: CFG.takerFee,
+      breakers: Object.assign({}, CFG.breakers),
+      vol_target: Object.assign({}, CFG.volTarget),
+    },
+    strategies: {
+      playbook: { on: S.strat.playbook.on, tf: PLAYBOOK_TF,
+                  alloc: Object.assign({}, S.strat.playbook.alloc) },
+      dualma:   { on: S.strat.dualma.on, alloc: Object.assign({}, S.strat.dualma.alloc),
+                  tf: Object.assign({}, S.strat.dualma.tf), fast: S.strat.dualma.fast,
+                  slow: S.strat.dualma.slow, adx_min: S.strat.dualma.adxMin,
+                  vol_mult: S.strat.dualma.volMult,
+                  use_trend_filter: S.strat.dualma.useTrendFilter },
+      macd:     { on: S.strat.macd.on, alloc: Object.assign({}, S.strat.macd.alloc),
+                  tf: Object.assign({}, S.strat.macd.tf), fast: S.strat.macd.fast,
+                  slow: S.strat.macd.slow, signal: S.strat.macd.signal,
+                  trend_len: S.strat.macd.trendLen, max_dist: S.strat.macd.maxDist,
+                  rr: S.strat.macd.rr },
+    },
+    backtest: { assets: RBT.cfg.assets.slice(), strats: RBT.cfg.strats.slice(),
+                years: RBT.cfg.years, equity: RBT.cfg.equity },
+    ui: { testnet: S.testnet, live_feed: LIVE.on, bt_src: S.btSrc },
+  };
+}
+
+function cfgApply(c){
+  if (!c || c.version !== 1) throw new Error("設定檔版本不符");
+  const r = c.risk || {};
+  if (r.breakers)   Object.assign(CFG.breakers, r.breakers);
+  if (r.vol_target) Object.assign(CFG.volTarget, r.vol_target);
+  const map = { riskPct:"risk_pct", minRR:"min_rr", slAtrMult:"sl_atr_mult",
+                maxMarginUse:"max_margin_use", takerFee:"taker_fee" };
+  Object.keys(map).forEach(k => { if (typeof r[map[k]] === "number") CFG[k] = r[map[k]]; });
+
+  const st = c.strategies || {};
+  if (st.playbook){
+    S.strat.playbook.on = !!st.playbook.on;
+    if (st.playbook.alloc) Object.assign(S.strat.playbook.alloc, st.playbook.alloc);
+    if (PB_TFS[st.playbook.tf]) PLAYBOOK_TF = st.playbook.tf;
+  }
+  if (st.dualma){
+    const d = st.dualma;
+    S.strat.dualma.on = !!d.on;
+    if (d.alloc) Object.assign(S.strat.dualma.alloc, d.alloc);
+    if (d.tf) Object.assign(S.strat.dualma.tf, d.tf);
+    if (d.fast) S.strat.dualma.fast = d.fast;
+    if (d.slow) S.strat.dualma.slow = d.slow;
+    if (typeof d.adx_min === "number") S.strat.dualma.adxMin = d.adx_min;
+    if (typeof d.vol_mult === "number") S.strat.dualma.volMult = d.vol_mult;
+    if (typeof d.use_trend_filter === "boolean") S.strat.dualma.useTrendFilter = d.use_trend_filter;
+  }
+  if (st.macd){
+    const m = st.macd;
+    S.strat.macd.on = !!m.on;
+    if (m.alloc) Object.assign(S.strat.macd.alloc, m.alloc);
+    if (m.tf) Object.assign(S.strat.macd.tf, m.tf);
+    ["fast","slow","signal"].forEach(k => { if (m[k]) S.strat.macd[k] = m[k]; });
+    if (m.trend_len) S.strat.macd.trendLen = m.trend_len;
+    if (typeof m.max_dist === "number") S.strat.macd.maxDist = m.max_dist;
+    if (typeof m.rr === "number") S.strat.macd.rr = m.rr;
+  }
+  if (c.backtest){
+    const b = c.backtest;
+    if (Array.isArray(b.assets) && b.assets.length) RBT.cfg.assets = b.assets;
+    if (Array.isArray(b.strats) && b.strats.length) RBT.cfg.strats = b.strats;
+    if (b.years) RBT.cfg.years = b.years;
+    if (b.equity) RBT.cfg.equity = b.equity;
+  }
+  if (c.ui){
+    if (typeof c.ui.testnet === "boolean") S.testnet = c.ui.testnet;
+    if (c.ui.bt_src) S.btSrc = c.ui.bt_src;
+    if (typeof c.ui.live_feed === "boolean" && c.ui.live_feed !== LIVE.on) liveToggle(c.ui.live_feed);
+  }
+  computeIndicators();
+}
+
+function cfgSave(){
+  try {
+    localStorage.setItem(CFG_KEY, JSON.stringify(cfgSnapshot()));
+    log("INFO","設定已儲存到瀏覽器。");
+    toast("<b>設定已儲存</b><br><span style='font-size:11.5px'>下次開啟會自動套用。</span>","g");
+  } catch(e){ toast("儲存失敗:"+esc(e.message),"r"); }
+}
+
+function cfgLoad(silent){
+  try {
+    const raw = localStorage.getItem(CFG_KEY);
+    if (!raw){ if(!silent) toast("沒有已儲存的設定。","a"); return false; }
+    cfgApply(JSON.parse(raw));
+    log("INFO","已載入儲存的設定。");
+    if (!silent) toast("<b>設定已載入。</b>","g");
+    return true;
+  } catch(e){
+    log("ERR","載入設定失敗 — "+e.message);
+    if (!silent) toast("載入失敗:"+esc(e.message),"r");
+    return false;
+  }
+}
+
+function cfgReset(){
+  try { localStorage.removeItem(CFG_KEY); } catch(e){}
+  log("WARN","已清除儲存的設定,重新整理後回到預設值。");
+  toast("已清除儲存的設定。","a");
+}
+
+function cfgExport(){
+  const blob = new Blob([JSON.stringify(cfgSnapshot(), null, 2)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "config.json";
+  a.click(); URL.revokeObjectURL(a.href);
+  toast("已匯出 <b>config.json</b><br><span style='font-size:11.5px'>放到 rust-backend/ 即可讓背景程式用同一份設定。</span>","g",7000);
+}
+
+function cfgImportFile(file){
+  const fr = new FileReader();
+  fr.onload = function(){
+    try { cfgApply(JSON.parse(fr.result)); cfgSave();
+          toast("<b>設定已匯入並儲存。</b>","g"); switchView(S.view); }
+    catch(e){ toast("匯入失敗:"+esc(e.message),"r"); }
+  };
+  fr.readAsText(file);
+}
+
 /* ------------------------------ 主控台 CONSOLE ------------------ */
 /* One operating screen: is it running, what is my money doing, what is
    open, stop it. Everything diagnostic lives behind a disclosure. */
@@ -3421,6 +3564,28 @@ V.setup = {
         槓桿不會創造優勢,只會放大你已有的優勢或劣勢。
       </div>
 
+      <div class="block">
+        <div class="bh"><span class="n">4 · 設定儲存</span>
+          <span class="d">瀏覽器自動記憶,或匯出給背景程式使用</span></div>
+        <div class="panel"><div class="pb">
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn pri" data-action="cfg-save">儲存設定</button>
+            <button class="btn" data-action="cfg-load">載入已儲存</button>
+            <button class="btn" data-action="cfg-export">匯出 config.json</button>
+            <button class="btn" data-action="cfg-import">匯入…</button>
+            <input type="file" id="cfg-file" accept="application/json" class="hide">
+            <button class="btn red" style="margin-left:auto" data-action="cfg-reset">清除</button>
+          </div>
+          <div class="note info" style="margin-top:11px;font-size:11.5px">
+            設定會存在這台瀏覽器,下次開啟自動套用。<b>API 金鑰不會被儲存</b> ——
+            瀏覽器不是放密鑰的安全位置,背景程式的金鑰請放在 <code>rust-backend/.env</code>。
+            <br>匯出的 <code>config.json</code> 放進 <code>rust-backend/</code>,
+            背景程式就會用完全相同的參數執行。
+          </div>
+          <div id="cfg-status" class="mono t4" style="font-size:10.5px;margin-top:8px"></div>
+        </div></div>
+      </div>
+
       <details class="more">
         <summary>進階 — 雙均線參數</summary>
         <div class="inner">
@@ -3481,6 +3646,12 @@ V.setup = {
 
   refresh(){
     renderBreakers("#su-brk");
+    const cs = $("#cfg-status");
+    if (cs){
+      let saved = null;
+      try { const raw = localStorage.getItem(CFG_KEY); if (raw) saved = JSON.parse(raw).saved_at; } catch(e){}
+      cs.textContent = saved ? ("上次儲存:" + new Date(saved).toLocaleString()) : "尚未儲存任何設定";
+    }
     const w = $("#su-expo");
     if (w && w.closest("details").open){
       const longs = S.positions.filter(p=>p.side==="LONG").length;
@@ -3662,6 +3833,12 @@ document.addEventListener("click", e => {
       break;
 
     case "strat-toggle": break; // handled on change
+
+    case "cfg-save":   cfgSave(); V.setup.refresh(); break;
+    case "cfg-load":   if (cfgLoad(false)) switchView("setup"); break;
+    case "cfg-export": cfgExport(); break;
+    case "cfg-reset":  cfgReset(); V.setup.refresh(); break;
+    case "cfg-import": { const f = $("#cfg-file"); if (f) f.click(); break; }
 
     case "macd-tf": {
       const k = t.dataset.k, tfc = S.strat.macd.tf;
@@ -3861,6 +4038,7 @@ document.addEventListener("change", e => {
     log("INFO", `Dual MA parameter ${f} → ${v}`);
     computeIndicators(); repaint();
   }
+  if (t.id === "cfg-file" && t.files && t.files[0]) cfgImportFile(t.files[0]);
   if (A === "live-toggle"){ liveToggle(t.checked); repaint(); }
   if (A === "ma-bool"){ S.strat.dualma[t.dataset.f] = t.checked; repaint(); }
   if (A === "calc"){ if (t.id==="rc-asset") syncCalc(); calcSizing(); }
@@ -3967,6 +4145,7 @@ function boot(){
   log("RISK",`風控已啟用:日虧 -${CFG.breakers.daily*100}% · 週虧 -${CFG.breakers.weekly*100}% · 連虧 ${CFG.breakers.streak} 筆進入冷卻 · 單日最多 ${CFG.breakers.maxTradesDay} 筆。`);
   log("WARN","尚未連線交易所。請到「設定」填入 API 金鑰後才能執行交易。");
 
+  cfgLoad(true);          // restore saved settings before first paint
   switchView("console");
   paintHeader();
   liveConnect();      // public market data only — no key, no account access

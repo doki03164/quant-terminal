@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "risk": { "leverage": 20, "risk_pct": 0.01, "min_rr": 2, "sl_atr_mult": 2,
+            "breakers": { "daily": 0.02, "weekly": 0.05, "streak": 3, "maxTradesDay": 2 } },
+  "strategies": {
+    "macd": { "on": true, "alloc": { "BTC": true, "ETH": true },
+              "tf": { "m15": false, "h4": true },
+              "fast": 12, "slow": 26, "signal": 9,
+              "trend_len": 120, "max_dist": 3.0, "rr": 2.0 }
+  }
+}

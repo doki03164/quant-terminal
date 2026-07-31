@@ -25,6 +25,8 @@ use sha2::Sha256;
 use std::{env, net::SocketAddr, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use tower_http::cors::CorsLayer;
 
+mod engine;
+mod indicators;
 mod trade;
 use trade::{close_all, place, OrderReq, OrderResp};
 
@@ -177,6 +179,11 @@ async fn bitget_balance(http: &reqwest::Client, k: &Keys) -> Result<VenueBalance
     Ok(out)
 }
 
+/// Total futures equity on Binance, used by the daemon to size positions.
+pub async fn binance_equity(http: &reqwest::Client, k: &Keys) -> Result<f64> {
+    Ok(binance_balance(http, k).await?.equity)
+}
+
 async fn get_balance(State(st): State<Arc<AppState>>) -> (StatusCode, Json<BalanceReply>) {
     let mut reply = BalanceReply {
         ok: true,
@@ -291,13 +298,89 @@ async fn main() -> Result<()> {
         tracing::warn!("no API keys configured — /api/balance will return zeros. See .env.example");
     }
 
-    let state = Arc::new(AppState {
-        http: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?,
-        binance,
-        bitget,
-    });
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    // ---- subcommands -------------------------------------------------
+    let args: Vec<String> = env::args().skip(1).collect();
+    let cmd = args.first().map(|s| s.as_str()).unwrap_or("serve");
+    match cmd {
+        "daemon" => {
+            let path = std::path::PathBuf::from(
+                env::var("CONFIG_PATH").unwrap_or_else(|_| "config.json".into()));
+            let cfg = engine::Config::load(&path)?;
+            tracing::info!("loaded {}", path.display());
+            if trade::live_enabled() && !trade::dry_run() {
+                tracing::error!("*** DAEMON ARMED FOR LIVE ORDERS WITH REAL FUNDS ***");
+            } else if trade::live_enabled() {
+                tracing::warn!("daemon running in DRY_RUN — signals logged, nothing sent");
+            } else {
+                tracing::info!("LIVE_TRADING=false — daemon will evaluate but never order");
+            }
+            let secs: u64 = env::var("DAEMON_INTERVAL_SECS").ok()
+                .and_then(|v| v.parse().ok()).unwrap_or(60);
+            return engine::Daemon::new(http, cfg, binance, secs).run().await;
+        }
+        "parity" => {
+            // Print indicator values for live data so they can be diffed
+            // against the browser's computeIndicators() output.
+            let sym = args.get(1).cloned().unwrap_or_else(|| "BTCUSDT".into());
+            let iv = args.get(2).cloned().unwrap_or_else(|| "4h".into());
+            let bars = engine::klines(&http, &sym, &iv, 500).await?;
+            let closes: Vec<f64> = bars.iter().map(|b| b.c).collect();
+            let n = closes.len();
+            let e120 = indicators::ema(&closes, 120);
+            let m = indicators::macd(&closes, 12, 26, 9);
+            println!("{{");
+            println!("  \"symbol\": \"{sym}\", \"interval\": \"{iv}\", \"bars\": {n},");
+            println!("  \"last_close\": {},", closes[n - 1]);
+            println!("  \"ema120\": {},", e120[n - 1]);
+            println!("  \"atr14\": {},", indicators::atr(&bars, 14));
+            println!("  \"adx14\": {},", indicators::adx(&bars, 14));
+            println!("  \"macd_line\": {},", m.line[n - 1]);
+            println!("  \"macd_signal\": {},", m.signal[n - 1]);
+            println!("  \"macd_hist\": {}", m.hist[n - 1]);
+            println!("}}");
+            return Ok(());
+        }
+        "check" => {
+            let path = std::path::PathBuf::from(
+                env::var("CONFIG_PATH").unwrap_or_else(|_| "config.json".into()));
+            match engine::Config::load(&path) {
+                Ok(c) => {
+                    println!("config OK  (version {})", c.version);
+                    println!("  leverage      {}", c.risk.leverage);
+                    println!("  risk/trade    {}%", c.risk.risk_pct * 100.0);
+                    println!("  stop          {}x ATR", c.risk.sl_atr_mult);
+                    match &c.strategies.macd {
+                        Some(m) => println!("  macd          on={} trend_len={} rr={}",
+                                            m.on, m.trend_len, m.rr),
+                        None => println!("  macd          (absent)"),
+                    }
+                    println!("  live_trading  {}", trade::live_enabled());
+                    println!("  dry_run       {}", trade::dry_run());
+                    return Ok(());
+                }
+                Err(e) => { eprintln!("config INVALID: {e}"); std::process::exit(1); }
+            }
+        }
+        "help" | "--help" | "-h" => {
+            println!("quant-terminal-backend\n");
+            println!("  serve    (default)  HTTP API for the dashboard");
+            println!("  daemon              run strategies headless, no browser needed");
+            println!("  check               validate config.json and print the effective settings");
+            println!("  parity [SYM] [TF]   print indicator values for cross-checking with the UI");
+            return Ok(());
+        }
+        "serve" => {}
+        other => {
+            eprintln!("unknown command '{other}' — try: help");
+            std::process::exit(2);
+        }
+    }
+
+    let state = Arc::new(AppState { http, binance, bitget });
 
     // Only the local dashboard may call this. Widen deliberately, never to Any:
     // any page you visit could otherwise read your balances.
