@@ -608,6 +608,14 @@ const S = {
     dualma:   { on:false, alloc:{BTC:true, ETH:true, SOL:true},
                 tf:{ m15:true, h4:true },
                 fast:5, slow:20, adxMin:22, volMult:1.2, useTrendFilter:true },
+    turtle:   { on:false, alloc:{BTC:true, ETH:true, SOL:true},
+                tf:{ m15:false, h4:true },
+                system:1, entryN:20, exitN:10, entryN2:55, exitN2:20,
+                atrN:20, stopN:2, useLossFilter:true },
+    rsi2:     { on:false, alloc:{BTC:true, ETH:true, SOL:true},
+                tf:{ m15:true, h4:false },
+                rsiLen:2, trendLen:200, buyBelow:5, sellAbove:95,
+                stopAtr:2, rr:1.0 },
     macd:     { on:false, alloc:{BTC:true, ETH:true, SOL:true},
                 tf:{ m15:false, h4:true },
                 fast:12, slow:26, signal:9, trendLen:120, maxDist:3.0, rr:2.0 },
@@ -1348,6 +1356,185 @@ function evalMacd(asset, tfKey){
 }
 
 /* ---------------------------------------------------------------- *
+ * 7c. STRATEGY 4 — 海龜交易法 TURTLE
+ * ------------------------------------------------------------------
+ * Dennis/Eckhardt's published rules, as documented by Curtis Faith.
+ *   System 1: enter on a 20-period breakout, exit on a 10-period reversal
+ *   System 2: enter on a 55-period breakout, exit on a 20-period reversal
+ *   N = ATR(20); the stop is 2N; size is risk_pct of equity per N.
+ * System 1 skips a breakout if the PREVIOUS System-1 signal would have won —
+ * that filter is what stops it front-running every failed breakout, and
+ * dropping it changes the system's character entirely, so it is kept.
+ *
+ * This is a low win-rate, high reward:risk design by construction: it takes
+ * many small losses on failed breakouts to catch the few large trends.
+ * ---------------------------------------------------------------- */
+function donchian(bars, n, upto){
+  const end = upto === undefined ? bars.length - 1 : upto;
+  const from = Math.max(0, end - n);
+  let hi = -Infinity, lo = Infinity;
+  for (let i = from; i < end; i++){          // excludes the current bar
+    if (bars[i].h > hi) hi = bars[i].h;
+    if (bars[i].l < lo) lo = bars[i].l;
+  }
+  return { hi, lo };
+}
+
+/** Would the previous System-1 breakout have been a winner? */
+function turtleLastWasWin(bars, C){
+  const n = bars.length;
+  let entry = null, dir = 0;
+  for (let i = C.entryN + 5; i < n - 1; i++){
+    const d = donchian(bars, C.entryN, i);
+    const x = donchian(bars, C.exitN, i);
+    if (entry === null){
+      if (bars[i].c > d.hi){ entry = bars[i].c; dir = 1; }
+      else if (bars[i].c < d.lo){ entry = bars[i].c; dir = -1; }
+    } else {
+      const out = dir > 0 ? bars[i].c < x.lo : bars[i].c > x.hi;
+      if (out){
+        const win = dir > 0 ? bars[i].c > entry : bars[i].c < entry;
+        entry = null;
+        if (i > n - 200) return win;         // only the most recent matters
+      }
+    }
+  }
+  return false;
+}
+
+function evalTurtle(asset, tfKey){
+  const m = S.mkt[asset], I = m.tf[tfKey], C = S.strat.turtle;
+  if (!I || !I.bars || I.bars.length < C.entryN + 60) return { checks:[], ok:false, tfKey };
+  const bars = I.bars, n = bars.length, label = TF[tfKey].label;
+  const i = n - 2;                            // last CLOSED bar
+  const checks = [];
+
+  const sysN  = C.system === 2 ? C.entryN2 : C.entryN;
+  const exitN = C.system === 2 ? C.exitN2  : C.exitN;
+  const d = donchian(bars, sysN, i);
+  const px = bars[i].c;
+
+  const up = px > d.hi, dn = px < d.lo;
+  checks.push({ k:`${sysN} 期唐奇安通道`, ok:(up||dn),
+    v: up ? `突破上軌 ${fmt(d.hi,2)} → 做多`
+       : dn ? `跌破下軌 ${fmt(d.lo,2)} → 做空`
+       : `區間內(${fmt(d.lo,2)} ~ ${fmt(d.hi,2)})` });
+  if (!up && !dn) return { checks, ok:false, tf:label, tfKey };
+
+  // System 1's losing-filter: skip if the previous signal would have won
+  let filterOk = true;
+  if (C.system === 1 && C.useLossFilter){
+    filterOk = !turtleLastWasWin(bars, { entryN:C.entryN, exitN:C.exitN });
+    checks.push({ k:"前次訊號過濾", ok:filterOk,
+      v: filterOk ? "前一次突破為虧損 → 可進場" : "前一次突破獲利 → 依規則跳過" });
+    if (!filterOk) return { checks, ok:false, tf:label, tfKey };
+  }
+
+  const N = atr(bars.slice(0, i+1), C.atrN);   // Turtle "N"
+  if (!(N > 0)) return { checks, ok:false, tf:label, tfKey };
+  const dir = up ? "UP" : "DOWN";
+  const side = up ? "LONG" : "SHORT";
+  const entry = m.last;
+  const slDist = C.stopN * N;
+  const sl = up ? entry - slDist : entry + slDist;
+  const x = donchian(bars, exitN, i);
+  // Target is the opposite channel; fall back to an N-multiple if it is behind us
+  let tp = up ? Math.max(x.hi, entry + slDist*CFG.minRR)
+              : Math.min(x.lo, entry - slDist*CFG.minRR);
+  const rr = Math.abs(tp - entry) / slDist;
+  checks.push({ k:`N = ATR(${C.atrN})`, ok:true,
+    v:`${fmt(N,2)} · 停損 ${C.stopN}N = ${fmt(slDist,2)}` });
+
+  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  if (!sizing.ok){ checks.push({k:"倉位",ok:false,v:sizing.why});
+                   return { checks, ok:false, side, dir, tf:label, tfKey }; }
+  checks.push({ k:"倉位", ok:true, v:`${sizing.qty.toFixed(4)} ${asset} · 盈虧比 1:${rr.toFixed(2)}` });
+
+  return { checks, ok:true, side, dir, tf:label, tfKey,
+           plan:{ entry, sl, tp, rr, slDist, ...sizing },
+           trigger:`海龜 S${C.system} ${sysN}期突破 ${label}` };
+}
+
+/* ---------------------------------------------------------------- *
+ * 7d. STRATEGY 5 — RSI2 回歸 (15m)
+ * ------------------------------------------------------------------
+ * Larry Connors' 2-period RSI mean reversion, with his trend filter.
+ * Documented rules: only take longs while price is above a long moving
+ * average, enter when RSI(2) collapses below ~5, exit when it recovers
+ * past ~65. Published equity backtests report win rates around 75-79%
+ * (quantifiedstrategies.com), which is why it is here — the user asked
+ * for a high-win-rate 15m system.
+ *
+ * READ THIS BEFORE BELIEVING THE WIN RATE: a high hit-rate necessarily
+ * comes with a SMALL average win. This system wins often and
+ * loses rarely but badly — published tests show ~34% drawdowns when a trend
+ * refuses to mean-revert. High win rate and high reward:risk are opposite
+ * ends of the same trade-off; you cannot have both.
+ * ---------------------------------------------------------------- */
+function rsi(closes, p){
+  const n = closes.length;
+  if (n < p + 1) return new Array(n).fill(50);
+  const out = new Array(n).fill(50);
+  let g = 0, l = 0;
+  for (let i = 1; i <= p; i++){
+    const d = closes[i] - closes[i-1];
+    if (d >= 0) g += d; else l -= d;
+  }
+  g /= p; l /= p;
+  out[p] = l === 0 ? 100 : 100 - 100/(1 + g/l);
+  for (let i = p+1; i < n; i++){
+    const d = closes[i] - closes[i-1];
+    g = (g*(p-1) + (d > 0 ? d : 0)) / p;
+    l = (l*(p-1) + (d < 0 ? -d : 0)) / p;
+    out[i] = l === 0 ? 100 : 100 - 100/(1 + g/l);
+  }
+  return out;
+}
+
+function evalRsi2(asset, tfKey){
+  const m = S.mkt[asset], I = m.tf[tfKey], C = S.strat.rsi2;
+  if (!I || !I.bars || I.bars.length < C.trendLen + 20) return { checks:[], ok:false, tfKey };
+  const bars = I.bars, n = bars.length, label = TF[tfKey].label;
+  const closes = bars.map(b => b.c);
+  const i = n - 2;                            // last CLOSED bar
+  const checks = [];
+
+  const trend = ema(closes, C.trendLen);
+  const R = rsi(closes, C.rsiLen);
+  const above = closes[i] > trend[i];
+  const side = above ? "LONG" : "SHORT";
+  const dir  = above ? "UP" : "DOWN";
+  checks.push({ k:`EMA${C.trendLen} 趨勢濾網`, ok:true,
+    v: above ? "價格在上 → 只做多(逢低買)" : "價格在下 → 只做空(逢高空)" });
+
+  const trig = above ? R[i] <= C.buyBelow : R[i] >= C.sellAbove;
+  checks.push({ k:`RSI(${C.rsiLen})`, ok:trig,
+    v:`${R[i].toFixed(1)}(需 ${above ? "≤"+C.buyBelow : "≥"+C.sellAbove}）` });
+  if (!trig) return { checks, ok:false, side, dir, tf:label, tfKey };
+
+  const a = atr(bars.slice(0, i+1), 14);
+  if (!(a > 0)) return { checks, ok:false, side, dir, tf:label, tfKey };
+
+  // Mean reversion targets the average, not a trend extension — so the
+  // reward is deliberately modest and the win rate is where the edge lives.
+  const entry = m.last;
+  const slDist = C.stopAtr * a;
+  const sl = above ? entry - slDist : entry + slDist;
+  const tp = above ? entry + slDist * C.rr : entry - slDist * C.rr;
+  checks.push({ k:"目標", ok:true,
+    v:`盈虧比 1:${C.rr}(均值回歸屬低盈虧比、高勝率)` });
+
+  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  if (!sizing.ok){ checks.push({k:"倉位",ok:false,v:sizing.why});
+                   return { checks, ok:false, side, dir, tf:label, tfKey }; }
+  checks.push({ k:"倉位", ok:true, v:`${sizing.qty.toFixed(4)} ${asset}` });
+
+  return { checks, ok:true, side, dir, tf:label, tfKey,
+           plan:{ entry, sl, tp, rr:C.rr, slDist, ...sizing },
+           trigger:`RSI${C.rsiLen} ${above?"超賣":"超買"} ${label}` };
+}
+
+/* ---------------------------------------------------------------- *
  * 8. POSITION SIZING  (GATE 5 / Risk Control Center)
  * ---------------------------------------------------------------- */
 /** Volatility targeting.
@@ -1437,7 +1624,8 @@ function checkBreakers(){
   }
   return { dPnl, wPnl, halted: now };
 }
-const anyStratOn = () => S.strat.playbook.on || S.strat.dualma.on || S.strat.macd.on;
+const anyStratOn = () => S.strat.playbook.on || S.strat.dualma.on || S.strat.macd.on
+                      || S.strat.turtle.on || S.strat.rsi2.on;
 const anyExOn = () => EXCHANGES.some(e => S.ex[e].on);
 const tradingBlocked = () =>
   S.killed || S.breaker.daily || S.breaker.weekly || S.breaker.streak ||
@@ -1571,7 +1759,7 @@ function unrealized(){
 /* ---------------------------------------------------------------- *
  * 11. ENGINE LOOP
  * ---------------------------------------------------------------- */
-let evalCache = { playbook:{}, dualma:{}, macd:{} };
+let evalCache = { playbook:{}, dualma:{}, macd:{}, turtle:{}, rsi2:{} };
 
 function runEngine(){
   // In backtest mode the timeframes are built incrementally by btAnalyze().
@@ -1584,9 +1772,13 @@ function runEngine(){
     evalCache.playbook[a] = evalPlaybook(a);
     evalCache.dualma[a]   = {};
     evalCache.macd[a]     = {};
+    evalCache.turtle[a]   = {};
+    evalCache.rsi2[a]     = {};
     DUALMA_TFS.forEach(k => {
       evalCache.dualma[a][k] = evalDualMA(a, k);
       evalCache.macd[a][k]   = evalMacd(a, k);
+      evalCache.turtle[a][k] = evalTurtle(a, k);
+      evalCache.rsi2[a][k]   = evalRsi2(a, k);
     });
   });
 
@@ -1620,6 +1812,20 @@ function runEngine(){
           if (!S.strat.macd.tf[k]) continue;
           const sig = evalCache.macd[a] && evalCache.macd[a][k];
           if (sig && sig.ok){ openPosition(a, "MACD", sig); return; }
+        }
+      }
+      if (S.strat.turtle.on && S.strat.turtle.alloc[a]){
+        for (const k of ["h4","m15"]){
+          if (!S.strat.turtle.tf[k]) continue;
+          const sig = evalCache.turtle[a] && evalCache.turtle[a][k];
+          if (sig && sig.ok){ openPosition(a, "TURTLE", sig); return; }
+        }
+      }
+      if (S.strat.rsi2.on && S.strat.rsi2.alloc[a]){
+        for (const k of ["m15","h4"]){
+          if (!S.strat.rsi2.tf[k]) continue;
+          const sig = evalCache.rsi2[a] && evalCache.rsi2[a][k];
+          if (sig && sig.ok){ openPosition(a, "RSI2", sig); return; }
         }
       }
     });
@@ -2222,6 +2428,10 @@ const STRATS = {
   dualma15: { label:"雙均線 · 15m",    exec:"m15", need:["15m"],          kind:"DUAL-MA",  tf:"15m" },
   macd4h:   { label:"MACD + EMA120 · 4H",  exec:"h4",  need:["4h"],       kind:"MACD",     tf:"4H" },
   macd15:   { label:"MACD + EMA120 · 15m", exec:"m15", need:["15m"],      kind:"MACD",     tf:"15m" },
+  turtle4h: { label:"海龜交易法 · 4H",      exec:"h4",  need:["4h"],       kind:"TURTLE",   tf:"4H" },
+  turtle15: { label:"海龜交易法 · 15m",     exec:"m15", need:["15m"],      kind:"TURTLE",   tf:"15m" },
+  rsi2_15:  { label:"RSI2 回歸 · 15m",      exec:"m15", need:["15m"],      kind:"RSI2",     tf:"15m" },
+  rsi2_4h:  { label:"RSI2 回歸 · 4H",       exec:"h4",  need:["4h"],       kind:"RSI2",     tf:"4H" },
 };
 const IV_TF = { "15m":"m15", "1h":"h1", "4h":"h4", "1d":"d1", "1w":"w1" };
 
@@ -2304,6 +2514,10 @@ async function startRealBacktest(){
     S.strat = {
       playbook:{ on:cfg.strats.includes("playbook"),
                  alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])) },
+      turtle:{ ...live.strat.turtle, on:cfg.strats.some(k=>k.startsWith("turtle")),
+               alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])) },
+      rsi2:{ ...live.strat.rsi2, on:cfg.strats.some(k=>k.startsWith("rsi2")),
+             alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])) },
       macd:{ on:cfg.strats.some(k=>k.startsWith("macd")),
              alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])),
              tf:{ m15:cfg.strats.includes("macd15"), h4:cfg.strats.includes("macd4h") },
@@ -2475,6 +2689,12 @@ function rbtSignals(cfg, W, T, execTFs, fine){
       } else if (meta.kind === "MACD"){
         if (!w.tf[meta.exec]) continue;
         sig = evalMacd(a, meta.exec);
+      } else if (meta.kind === "TURTLE"){
+        if (!w.tf[meta.exec]) continue;
+        sig = evalTurtle(a, meta.exec);
+      } else if (meta.kind === "RSI2"){
+        if (!w.tf[meta.exec]) continue;
+        sig = evalRsi2(a, meta.exec);
       } else {
         const k = meta.exec;
         if (!w.tf[k]) continue;
@@ -2696,7 +2916,7 @@ function cfgImportFile(file){
  * on) are enforced there, not here, because a check that lives only in
  * the browser is not a check at all.
  * ---------------------------------------------------------------- */
-const ENVED = { loaded:false, data:null, err:"", busy:false, dirty:{} };
+const ENVED = { loaded:false, data:null, err:"", busy:false, dirty:{}, rev:0 };
 
 async function envLoad(){
   ENVED.busy = true; ENVED.err = "";
@@ -2704,7 +2924,7 @@ async function envLoad(){
     const r = await fetch(`${BE.url}/api/env`, { cache:"no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
     ENVED.data = await r.json();
-    ENVED.loaded = true; ENVED.dirty = {};
+    ENVED.loaded = true; ENVED.dirty = {}; ENVED.rev++;
   } catch(e){
     ENVED.loaded = false; ENVED.err = String(e.message || e);
   }
@@ -3776,9 +3996,16 @@ V.setup = {
 
   refresh(){
     renderBreakers("#su-brk");
+    // The setup view refreshes on every heartbeat. Re-rendering the editor
+    // would destroy the <input> the user is typing into and drop focus mid-key,
+    // so only paint when the underlying state actually changed.
     const ee = $("#env-editor");
     if (ee){
-      ee.innerHTML = envEditorHTML();
+      const stamp = [BE.up, ENVED.loaded, ENVED.busy, ENVED.err, ENVED.rev || 0].join("|");
+      if (ee.dataset.stamp !== stamp){
+        ee.dataset.stamp = stamp;
+        ee.innerHTML = envEditorHTML();
+      }
       if (BE.up && !ENVED.loaded && !ENVED.busy && !ENVED.err) envLoad();
     }
     const cs = $("#cfg-status");
@@ -3973,6 +4200,7 @@ document.addEventListener("click", e => {
     case "env-save":   envSave(); break;
     case "env-safe": {
       ENVED.dirty[t.dataset.k] = t.dataset.v;
+      ENVED.rev++;
       envSave();
       break;
     }
@@ -4191,7 +4419,13 @@ document.addEventListener("input", e => {
   const t = e.target.closest("[data-action]");
   if (!t) return;
   if (t.dataset.action === "ex-field") S.ex[t.dataset.x][t.dataset.f] = t.value.trim();
-  if (t.dataset.action === "env-field") ENVED.dirty[t.dataset.k] = t.value;
+  if (t.dataset.action === "env-field"){
+    // record the edit only; repainting here would yank focus away
+    ENVED.dirty[t.dataset.k] = t.value;
+    const lbl = t.previousElementSibling;
+    if (lbl && !lbl.querySelector(".acc"))
+      lbl.insertAdjacentHTML("beforeend", ' <span class="acc">· 已修改</span>');
+  }
   if (t.dataset.action === "logfilter") S.logFilter = t.value;
   if (t.dataset.action === "calc") calcSizing();
 });
@@ -4275,9 +4509,13 @@ function boot(){
     evalCache.playbook[a] = evalPlaybook(a);
     evalCache.dualma[a] = {};
     evalCache.macd[a] = {};
+    evalCache.turtle[a] = {};
+    evalCache.rsi2[a] = {};
     DUALMA_TFS.forEach(k => {
       evalCache.dualma[a][k] = evalDualMA(a, k);
       evalCache.macd[a][k]   = evalMacd(a, k);
+      evalCache.turtle[a][k] = evalTurtle(a, k);
+      evalCache.rsi2[a][k]   = evalRsi2(a, k);
     });
   });
   S.equityCurve.push(S.acct.equity);

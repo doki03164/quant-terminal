@@ -409,8 +409,12 @@ async fn main() -> Result<()> {
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
+    // A JSON POST triggers a preflight, and the browser aborts unless the
+    // response explicitly allows the content-type header. Without this every
+    // POST from the dashboard fails before it reaches a handler.
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([axum::http::header::CONTENT_TYPE])
         .allow_origin(origins);
 
     let app = Router::new()
