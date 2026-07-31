@@ -525,6 +525,9 @@ const CFG = {
   maxMarginUse: 0.80,           // margin utilisation < 80%
   minConfluence: 3,             // GATE 4: >= 3 confluences
   breakers: { daily: 0.02, weekly: 0.05, streak: 3, maxTradesDay: 2 },
+  // Volatility targeting — see volScalar(). Off by default so it is an
+  // explicit choice, not something that silently changes your position sizes.
+  volTarget: { on: false, lookback: 60, min: 0.5, max: 1.5 },
   barMs: 1500,                  // one simulated 15m bar every 1.5s
   tickMs: 700,
   // trendStrength: per-15m-bar drift as a fraction of per-bar vol while a regime
@@ -553,7 +556,15 @@ const TF = {
   d1:  { label:"D1",  ratio:96,  lr:3, cap:300 },
   w1:  { label:"W1",  ratio:672, lr:2, cap:60  },
 };
-const PLAYBOOK_TF = "h4";              // 交易操作手冊 execution timeframe
+// Execution timeframe for the playbook, plus the two context layers above it.
+// The manual runs on 1H with 4H+D1 context; 4H shifts everything up one step
+// and cuts setup frequency roughly 4x, which is a structural consequence of the
+// timeframe choice rather than a filter being too strict.
+const PB_TFS = {
+  h1: { exec:"h1", htf:"h4", top:"d1", label:"1H", need:["1h","4h","1d"] },
+  h4: { exec:"h4", htf:"d1", top:"w1", label:"4H", need:["4h","1d","1w"] },
+};
+let PLAYBOOK_TF = "h4";
 const DUALMA_TFS  = ["m15","h4"];      // 雙均線系統 runs on both
 
 // Volume calibration: live bars accumulate per tick, seeded bars are drawn in
@@ -569,6 +580,7 @@ const EXNAME = { binance: "Binance Futures", bitget: "Bitget Futures" };
  * ---------------------------------------------------------------- */
 const S = {
   view: "console",
+  btSrc: "real",                // 回測資料來源:real | sim
   paused: false,                // true while a backtest owns the world
   btMode: false,                // true while running inside the backtest engine
   booted: Date.now(),
@@ -596,6 +608,9 @@ const S = {
     dualma:   { on:false, alloc:{BTC:true, ETH:true, SOL:true},
                 tf:{ m15:true, h4:true },
                 fast:5, slow:20, adxMin:22, volMult:1.2, useTrendFilter:true },
+    macd:     { on:false, alloc:{BTC:true, ETH:true, SOL:true},
+                tf:{ m15:false, h4:true },
+                fast:12, slow:26, signal:9, trendLen:120, maxDist:3.0, rr:2.0 },
   },
 
   positions: [],
@@ -938,12 +953,26 @@ function regimeStage(bars, st){
  *  Taking the closest swing level without checking its side lets a short book a
  *  "target" above its entry, which fills instantly at a loss. Returns null when
  *  the direction has no defined structural target — GATE 3 then rejects. */
-function nextKeyLevel(m, dir, px){
+function nextKeyLevel(m, dir, px, minDist){
   const lv = [];
-  [m.tf.d1, m.tf.w1].forEach(t => t && t.st && t.st.lab.forEach(l => lv.push(l.p)));
+  const P = PB_TFS[PLAYBOOK_TF];
+  // GATE 3 measures room to the next HIGHER-timeframe key level
+  // (「到下一個 4H/日線關鍵位」). Including the execution frame's own swing
+  // points puts the target far too close and starves the gate of room — that
+  // regression took the strategy to zero trades.
+  [m.tf[P.htf], m.tf[P.top]]
+    .forEach(t => t && t.st && t.st.lab.forEach(l => lv.push(l.p)));
   const ahead = dir === "UP" ? lv.filter(v => v > px*1.0008)
                              : lv.filter(v => v < px*0.9992);
   if (!ahead.length) return null;
+  // 「保守 = 下一個擺動點,積極 = 更高框架的下一個 S/R」— always taking the
+  // NEAREST level starves the reward side, so step outward to the first level
+  // that can actually carry the minimum RR before falling back to the furthest.
+  if (minDist > 0){
+    const ok = ahead.filter(v => Math.abs(v - px) >= minDist);
+    if (ok.length) return dir === "UP" ? Math.min(...ok) : Math.max(...ok);
+    return dir === "UP" ? Math.max(...ahead) : Math.min(...ahead);
+  }
   return dir === "UP" ? Math.min(...ahead) : Math.max(...ahead);
 }
 
@@ -1019,7 +1048,7 @@ function computeIndicators(){
       m.tf[k].barIdx = Math.floor(m.barIdx / t.ratio);
     }
     // legacy alias so anything still reading m.ind gets the execution timeframe
-    m.ind = m.tf[PLAYBOOK_TF];
+    m.ind = m.tf[PB_TFS[PLAYBOOK_TF].exec];
 
     // Cross detection is a *bar-close* event, tracked independently per
     // timeframe. Evaluating it per tick means the volume/ADX/structure filters
@@ -1048,8 +1077,10 @@ const GATE_TITLES = [
 /* Execution timeframe is 4H; the manual's three-layer split shifts up with it,
    so direction now comes from W1 and room-to-target from D1. */
 function evalPlaybook(asset){
-  const m = S.mkt[asset], I = m.tf[PLAYBOOK_TF], px = m.last;
-  const HTF = m.tf.d1, TOP = m.tf.w1;
+  const P = PB_TFS[PLAYBOOK_TF];
+  const m = S.mkt[asset], I = m.tf[P.exec], px = m.last;
+  const HTF = m.tf[P.htf], TOP = m.tf[P.top];
+  if (!I || !HTF || !TOP) return { gates:[], ok:false, stop:0 };
   const g = [];
   const push = (n,state,det) => g.push({ n, title:GATE_TITLES[n-1], state, det });
   const skipRest = from => { for (let k=from;k<=7;k++) push(k,"skip","—"); };
@@ -1080,21 +1111,27 @@ function evalPlaybook(asset){
   push(2,"pass",`${mat.stage} · ${mat.impulses} legs · dev ${dev.toFixed(1)}×ATR`);
 
   /* GATE 3 — D1 + W1 alignment + room to the next key level */
-  const d1d = HTF.st.dir !== "NONE" ? HTF.st.dir : HTF.stage.dir;
+  // The manual prohibits trading AGAINST the higher timeframe
+  // (「絕不逆著高時間框架做單」) — it does not require the higher timeframe to
+  // positively confirm. Vetoing whenever D1 is merely unclear was my own
+  // stricter reading and it removed the large majority of valid setups.
+  const d1Struct = HTF.st.dir;
+  const d1d = d1Struct !== "NONE" ? d1Struct : HTF.stage.dir;
   const W = TOP.stage;
-  if (d1d !== dir){
-    push(3,"fail",`D1=${d1d} ≠ 4H=${dir} · never trade against HTF`);
+  if (d1d !== "NONE" && d1d !== dir){
+    push(3,"fail",`${P.htf.toUpperCase()}=${d1d} 逆於 ${P.label}=${dir} · 不可逆高週期`);
     skipRest(4); return { gates:g, ok:false, stop:3, dir, side };
   }
   // Per the manual, the top frame only has to be *clearly identifiable* — 日線階段
   // 能明確判定,不是無結構或反轉中. It is the immediately higher frame (here D1)
   // that must share direction. Demanding directional agreement from the top frame
   // too is stricter than the source and cuts valid setups roughly in half.
-  if (W.stage === "RANGING" || W.stage === "REVERSING" || W.stage === "NO STRUCTURE"){
-    push(3,"fail",`weekly = ${W.stage} → not tradeable`);
+  if (W.stage === "REVERSING" || (W.dir !== "NONE" && W.dir !== dir)){
+    push(3,"fail",`${P.top.toUpperCase()} = ${W.stage} 逆向 → 不可交易`);
     skipRest(4); return { gates:g, ok:false, stop:3, dir, side };
   }
-  const keyLvl = nextKeyLevel(m, dir, px);
+  // reward must clear minRR x (2xATR stop) for the setup to be worth measuring
+  const keyLvl = nextKeyLevel(m, dir, px, CFG.minRR * CFG.slAtrMult * I.atr);
   if (keyLvl === null){
     push(3,"fail",`no HTF structural target ${dir==="UP"?"above":"below"} price`);
     skipRest(4); return { gates:g, ok:false, stop:3, dir, side };
@@ -1104,7 +1141,7 @@ function evalPlaybook(asset){
     push(3,"fail",`only ${room.toFixed(1)}×ATR to HTF level — no room for 1:2`);
     skipRest(4); return { gates:g, ok:false, stop:3, dir, side };
   }
-  push(3,"pass",`D1 ${d1d} · W1 ${W.stage} · room ${room.toFixed(1)}×ATR`);
+  push(3,"pass",`${P.htf.toUpperCase()} ${d1d} · ${P.top.toUpperCase()} ${W.stage} · 空間 ${room.toFixed(1)}×ATR`);
 
   /* GATE 4 — HPCZ: >= 3 confluences, one must be 25/50 EMA */
   const respects = Math.abs(px-I.e25) < Math.abs(px-I.e50) ? 25 : 50;
@@ -1124,9 +1161,10 @@ function evalPlaybook(asset){
       if (Math.abs(px-lvl)/I.atr < 0.55 && !conf.some(c=>c.startsWith("Fib"))) conf.push(`Fib ${(f*100).toFixed(1)}%`);
     });
   }
-  // pullback (not mid-impulse)
+  // Being in a pullback is precondition C1 in the manual, NOT one of the six
+  // confluence factors. Counting it inflated the tally while genuine setups
+  // with 3 real factors were still rejected for lacking the EMA.
   const pulling = dir==="UP" ? px < I.e25*1.004 : px > I.e25*0.996;
-  if (pulling) conf.push("in pullback");
 
   const hasEma = conf.some(c=>c.includes("EMA"));
   if (conf.length < CFG.minConfluence || !hasEma || !pulling){
@@ -1171,7 +1209,7 @@ function evalPlaybook(asset){
 
   /* GATE 7 — execution */
   push(7,"pass","all 18 preconditions true → armed");
-  return { gates:g, ok:true, stop:7, dir, side, conf, tf:TF[PLAYBOOK_TF].label,
+  return { gates:g, ok:true, stop:7, dir, side, conf, tf:P.label,
            plan:{ entry, sl, tp, rr, slDist, ...sizing }, trigger:cc.kind };
 }
 
@@ -1232,10 +1270,124 @@ function evalDualMA(asset, tfKey){
 }
 
 /* ---------------------------------------------------------------- *
+ * 7b. STRATEGY 3 — MACD + EMA120 趨勢過濾
+ * ------------------------------------------------------------------
+ * EMA120 is the regime gate: longs only above it, shorts only below.
+ * MACD supplies the timing (signal-line cross on a closed bar), with the
+ * histogram required to agree so we skip crosses that happen while
+ * momentum is still running the other way.
+ *
+ * The long-MA filter is the one piece here with real evidence behind it —
+ * time-series momentum (Moskowitz, Ooi & Pedersen 2012, JFE) documents
+ * that filtering by a slow trend measure improves risk-adjusted return
+ * across asset classes. MACD timing itself has no comparable support; it
+ * is a smoothing of the same price series, not an independent signal.
+ * ---------------------------------------------------------------- */
+function macd(closes, fast=12, slow=26, sig=9){
+  const ef = ema(closes, fast), es = ema(closes, slow);
+  const line = closes.map((_,i) => ef[i] - es[i]);
+  const signal = ema(line, sig);
+  const hist = line.map((v,i) => v - signal[i]);
+  return { line, signal, hist };
+}
+
+function evalMacd(asset, tfKey){
+  const m = S.mkt[asset], I = m.tf[tfKey], px = m.last, C = S.strat.macd;
+  if (!I || !I.bars || I.bars.length < C.trendLen + 40) return { checks:[], ok:false, tfKey };
+  const label = TF[tfKey].label;
+  const closes = I.bars.map(b => b.c);
+  const n = closes.length;
+  const trend = ema(closes, C.trendLen);
+  const M = macd(closes, C.fast, C.slow, C.signal);
+
+  // read the last CLOSED bar, not the one still forming
+  const i = n - 2;
+  if (i < 2) return { checks:[], ok:false, tfKey };
+  const checks = [];
+
+  const above = closes[i] > trend[i];
+  const dir = above ? "UP" : "DOWN";
+  const side = above ? "LONG" : "SHORT";
+  const dist = Math.abs(closes[i] - trend[i]) / I.atr;
+  checks.push({ k:`EMA${C.trendLen} 趨勢`, ok:true,
+    v:`價格在 EMA${C.trendLen} ${above?"之上 → 只做多":"之下 → 只做空"}(距離 ${dist.toFixed(1)}×ATR)` });
+
+  const crossUp = M.line[i-1] <= M.signal[i-1] && M.line[i] > M.signal[i];
+  const crossDn = M.line[i-1] >= M.signal[i-1] && M.line[i] < M.signal[i];
+  const crossed = above ? crossUp : crossDn;
+  checks.push({ k:"MACD 訊號線交叉", ok:crossed,
+    v: crossed ? (above?"黃金交叉":"死亡交叉")
+       : `無交叉(DIF ${M.line[i]>M.signal[i]?">":"<"} DEA)` });
+
+  const histOk = above ? M.hist[i] > 0 && M.hist[i] > M.hist[i-1]
+                       : M.hist[i] < 0 && M.hist[i] < M.hist[i-1];
+  checks.push({ k:"柱狀圖動能", ok:histOk,
+    v:`${M.hist[i].toFixed(4)}(${histOk?"同向增強":"未同向"})` });
+
+  // Reject entries stretched far from the trend line — buying an extended
+  // move is where a 2xATR stop gets hit by ordinary mean reversion.
+  const notExtended = dist <= C.maxDist;
+  checks.push({ k:"乖離過濾", ok:notExtended,
+    v:`${dist.toFixed(1)}×ATR(上限 ${C.maxDist}）` });
+
+  const ok = crossed && histOk && notExtended;
+  if (!ok) return { checks, ok:false, side, dir, tf:label, tfKey };
+
+  const entry = px;
+  const slDist = CFG.slAtrMult * I.atr;
+  const sl = above ? entry - slDist : entry + slDist;
+  const tp = above ? entry + slDist*C.rr : entry - slDist*C.rr;
+  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  if (!sizing.ok){ checks.push({k:"倉位",ok:false,v:sizing.why});
+                   return { checks, ok:false, side, dir, tf:label, tfKey }; }
+  checks.push({ k:"倉位", ok:true, v:`${sizing.qty.toFixed(4)} ${asset} · 保證金 ${usd(sizing.margin)}` });
+
+  return { checks, ok:true, side, dir, tf:label, tfKey,
+           plan:{ entry, sl, tp, rr:C.rr, slDist, ...sizing },
+           trigger:`MACD ${above?"金叉":"死叉"} + EMA${C.trendLen} ${label}` };
+}
+
+/* ---------------------------------------------------------------- *
  * 8. POSITION SIZING  (GATE 5 / Risk Control Center)
  * ---------------------------------------------------------------- */
+/** Volatility targeting.
+ *
+ *  Scales risk inversely to how volatile the instrument currently is relative
+ *  to its own recent norm: quiet regime → up to `volMax`× the base risk, wild
+ *  regime → down to `volMin`×. Moreira & Muir (2017, Journal of Finance,
+ *  "Volatility-Managed Portfolios") found that reducing exposure after
+ *  volatility spikes improved risk-adjusted returns across equity factors;
+ *  the mechanism is that volatility is far more forecastable than return, so
+ *  cutting size in turbulent periods removes variance without giving up much
+ *  expected profit. The cap matters: uncapped inverse-vol sizing loads up
+ *  enormously in calm markets, which is exactly when regime breaks start.
+ *
+ *  Note this scales RISK, not the stop. The stop stays at 2×ATR; what changes
+ *  is how many dollars ride on it.
+ */
+function volScalar(asset){
+  const V = CFG.volTarget;
+  if (!V.on) return 1;
+  const m = S.mkt[asset];
+  const I = m && m.tf && (m.tf[PB_TFS[PLAYBOOK_TF].exec] || m.tf.h4 || m.tf.m15);
+  if (!I || !I.bars || I.bars.length < V.lookback + 5) return 1;
+  const bars = I.bars;
+  const atrPct = I.atr / bars[bars.length-1].c;
+  // baseline = median ATR% over the lookback, robust to single spikes
+  const hist = [];
+  for (let i = bars.length - V.lookback; i < bars.length; i++){
+    const b = bars[i]; if (!b || !b.c) continue;
+    hist.push((b.h - b.l) / b.c);
+  }
+  if (hist.length < 10) return 1;
+  hist.sort((a,b)=>a-b);
+  const med = hist[hist.length >> 1];
+  if (!(med > 0) || !(atrPct > 0)) return 1;
+  return clamp(med / atrPct, V.min, V.max);
+}
+
 function sizePosition(equity, slDist, entry, asset){
-  const riskAmt = equity * CFG.riskPct;
+  const riskAmt = equity * CFG.riskPct * volScalar(asset);
   let qty = riskAmt / slDist;
   const step = CFG.assets[asset].qstep;
   qty = Math.max(step, roundStep(qty, step));
@@ -1285,7 +1437,7 @@ function checkBreakers(){
   }
   return { dPnl, wPnl, halted: now };
 }
-const anyStratOn = () => S.strat.playbook.on || S.strat.dualma.on;
+const anyStratOn = () => S.strat.playbook.on || S.strat.dualma.on || S.strat.macd.on;
 const anyExOn = () => EXCHANGES.some(e => S.ex[e].on);
 const tradingBlocked = () =>
   S.killed || S.breaker.daily || S.breaker.weekly || S.breaker.streak ||
@@ -1339,7 +1491,7 @@ function openPosition(asset, strat, sig){
   }
 
   const pos = {
-    id: "P-" + uid(), asset, ex, strat, tf: sig.tf || TF[PLAYBOOK_TF].label,
+    id: "P-" + uid(), asset, ex, strat, tf: sig.tf || PB_TFS[PLAYBOOK_TF].label,
     side: sig.side, entry: p.entry, qty: p.qty, notional: p.notional,
     margin: p.margin, sl: p.sl, tp: p.tp, rr: p.rr, slDist: p.slDist,
     liq: liqPrice(p.entry, sig.side),
@@ -1419,7 +1571,7 @@ function unrealized(){
 /* ---------------------------------------------------------------- *
  * 11. ENGINE LOOP
  * ---------------------------------------------------------------- */
-let evalCache = { playbook:{}, dualma:{} };
+let evalCache = { playbook:{}, dualma:{}, macd:{} };
 
 function runEngine(){
   // In backtest mode the timeframes are built incrementally by btAnalyze().
@@ -1431,7 +1583,11 @@ function runEngine(){
   ASSETS.forEach(a => {
     evalCache.playbook[a] = evalPlaybook(a);
     evalCache.dualma[a]   = {};
-    DUALMA_TFS.forEach(k => { evalCache.dualma[a][k] = evalDualMA(a, k); });
+    evalCache.macd[a]     = {};
+    DUALMA_TFS.forEach(k => {
+      evalCache.dualma[a][k] = evalDualMA(a, k);
+      evalCache.macd[a][k]   = evalMacd(a, k);
+    });
   });
 
   managePositions();
@@ -1457,6 +1613,13 @@ function runEngine(){
           if (!S.strat.dualma.tf[k]) continue;
           const sig = evalCache.dualma[a][k];
           if (sig && sig.ok){ openPosition(a, "DUAL-MA", sig); return; }
+        }
+      }
+      if (S.strat.macd.on && S.strat.macd.alloc[a]){
+        for (const k of ["h4","m15"]){
+          if (!S.strat.macd.tf[k]) continue;
+          const sig = evalCache.macd[a] && evalCache.macd[a][k];
+          if (sig && sig.ok){ openPosition(a, "MACD", sig); return; }
         }
       }
     });
@@ -1486,7 +1649,8 @@ const BT = {
 };
 // Windows must match TF[].cap so the backtest analyses exactly what live does.
 const BTCAP = { m15:TF.m15.cap, h1:TF.h1.cap, h4:TF.h4.cap, d1:TF.d1.cap, w1:TF.w1.cap };
-const BT_SKIP = { h1:true };         // no strategy reads 1H — don't pay for it
+// 1H is only analysed when the playbook actually executes there.
+const BT_SKIP = { get h1(){ return PLAYBOOK_TF !== "h1"; } };
 const BARS_PER_DAY = 96, BARS_PER_YEAR = 96*365;
 const BT_WARMUP = 26880;             // 280 days so W1 has ~40 candles before trading
 
@@ -1691,7 +1855,8 @@ function startBacktest(){
              dayAnchor:cfg.equity, weekAnchor:cfg.equity, peak:cfg.equity };
   S.positions = []; S.closed = []; S.orders = []; S.killed = false;
   S.breaker = { daily:false, weekly:false, streak:false, cooldownUntil:0, streakCount:0, tradesToday:0 };
-  S.strat = { playbook:{ on:cfg.playbook, alloc:{BTC:true,ETH:true,SOL:true} },
+  S.strat = { macd:{ ...live.strat.macd, on:false },
+              playbook:{ on:cfg.playbook, alloc:{BTC:true,ETH:true,SOL:true} },
               dualma:{ on:cfg.dualma, alloc:{BTC:true,ETH:true,SOL:true},
                        tf:{ m15:cfg.m15, h4:cfg.h4 },
                        fast:live.strat.dualma.fast, slow:live.strat.dualma.slow,
@@ -1959,6 +2124,426 @@ function liveStatusChip(){
   return `<span class="chip ${m[0]}">${m[1]}</span>`;
 }
 
+/* ---------------------------------------------------------------- *
+ * 12c. 真實市場資料 REAL MARKET DATA (Binance public klines)
+ * ------------------------------------------------------------------
+ * /api/v3/klines is public and CORS-open, so a browser can pull full
+ * OHLCV history without a key. Paginates forward 1000 bars at a time.
+ * Every bar carries its closeTime, which the backtest uses to enforce
+ * no-lookahead across timeframes.
+ * ---------------------------------------------------------------- */
+const KL_MS = { "15m":9e5, "1h":36e5, "4h":144e5, "1d":864e5, "1w":6048e5 };
+const KLINE_CACHE = {};                       // "BTCUSDT|4h|from|to" -> bars
+
+async function binanceKlines(symbol, interval, startMs, endMs, onProg){
+  const key = `${symbol}|${interval}|${startMs}|${endMs}`;
+  if (KLINE_CACHE[key]) return KLINE_CACHE[key];
+  const out = [];
+  let cursor = startMs;
+  let guard = 0;
+  while (cursor < endMs && guard++ < 4000){
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}`
+              + `&interval=${interval}&startTime=${cursor}&endTime=${endMs}&limit=1000`;
+    let rows;
+    for (let attempt=0; ; attempt++){
+      const r = await fetch(url, { cache:"no-store" });
+      if (r.status === 429 || r.status === 418){        // rate limited — back off
+        if (attempt >= 4) throw new Error("Binance 限流,請稍後再試");
+        await new Promise(s => setTimeout(s, 2000*(attempt+1)));
+        continue;
+      }
+      if (!r.ok) throw new Error(`Binance HTTP ${r.status}`);
+      rows = await r.json();
+      break;
+    }
+    if (!rows.length) break;
+    rows.forEach(k => out.push({
+      t:+k[0], o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], ct:+k[6],
+    }));
+    const last = rows[rows.length-1];
+    const next = +last[0] + KL_MS[interval];
+    if (next <= cursor) break;
+    cursor = next;
+    if (onProg) onProg(out.length, Math.min(1, (cursor-startMs)/Math.max(1,endMs-startMs)));
+    if (rows.length < 1000) break;
+  }
+  KLINE_CACHE[key] = out;
+  return out;
+}
+
+/** Earliest bar Binance has for this symbol — SOL listed years after BTC, and
+ *  silently padding a shorter history would fake a longer track record. */
+async function binanceListedAt(symbol){
+  const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}`
+                      + `&interval=1M&startTime=0&limit=1`, { cache:"no-store" });
+  if (!r.ok) throw new Error(`Binance HTTP ${r.status}`);
+  const j = await r.json();
+  return j.length ? +j[0][0] : null;
+}
+
+/* ---------------------------------------------------------------- *
+ * 12d. 真實市場回測 REAL-DATA BACKTEST
+ * ------------------------------------------------------------------
+ * Walks real Binance OHLCV forward on a global clock. Higher timeframes
+ * are advanced strictly by closeTime, so a 4H decision can only ever see
+ * daily/weekly candles that had already closed at that moment — no
+ * lookahead. Fills use the close of the signalling bar; stops and targets
+ * are checked against each later bar's high/low, and when a single bar
+ * spans both, the stop is assumed to have hit first (worst case).
+ * ---------------------------------------------------------------- */
+const RBT = {
+  running:false, cancel:false, pct:0, phase:"", res:null,
+  cfg:{ assets:["BTC"], strats:["playbook"], years:4, equity:10000 },
+};
+/* The manual's 3-4 trades/week assumes a 10-12 instrument watchlist scanned
+   daily. On 3 symbols the same rules produce ~1 setup a month — that is the
+   universe size, not a filter being too tight. Backtests may draw on a wider
+   list of liquid USDT perps; dp/qstep only affect display and lot rounding. */
+const RBT_SYM = { BTC:"BTCUSDT", ETH:"ETHUSDT", SOL:"SOLUSDT" };
+const UNIVERSE = {
+  BTC:{sym:"BTCUSDT",dp:1,qstep:0.001},  ETH:{sym:"ETHUSDT",dp:2,qstep:0.01},
+  SOL:{sym:"SOLUSDT",dp:3,qstep:0.1},    BNB:{sym:"BNBUSDT",dp:2,qstep:0.01},
+  XRP:{sym:"XRPUSDT",dp:4,qstep:1},      ADA:{sym:"ADAUSDT",dp:4,qstep:1},
+  DOGE:{sym:"DOGEUSDT",dp:5,qstep:1},    AVAX:{sym:"AVAXUSDT",dp:3,qstep:0.1},
+  LINK:{sym:"LINKUSDT",dp:3,qstep:0.1},  DOT:{sym:"DOTUSDT",dp:3,qstep:0.1},
+  LTC:{sym:"LTCUSDT",dp:2,qstep:0.01},   ATOM:{sym:"ATOMUSDT",dp:3,qstep:0.1},
+};
+// register the wider universe so sizing/formatting work for every symbol
+Object.entries(UNIVERSE).forEach(([k,v])=>{
+  if (!CFG.assets[k]) CFG.assets[k] = { px:100, vol:0.003, dp:v.dp, qstep:v.qstep };
+  RBT_SYM[k] = v.sym;
+});
+const STRATS = {
+  playbook: { get label(){return "七關趨勢法 · "+PB_TFS[PLAYBOOK_TF].label;},
+              get exec(){return PB_TFS[PLAYBOOK_TF].exec;},
+              get need(){return PB_TFS[PLAYBOOK_TF].need;},
+              kind:"PLAYBOOK", get tf(){return PB_TFS[PLAYBOOK_TF].label;} },
+  dualma4h: { label:"雙均線 · 4H",     exec:"h4",  need:["4h"],           kind:"DUAL-MA",  tf:"4H" },
+  dualma15: { label:"雙均線 · 15m",    exec:"m15", need:["15m"],          kind:"DUAL-MA",  tf:"15m" },
+  macd4h:   { label:"MACD + EMA120 · 4H",  exec:"h4",  need:["4h"],       kind:"MACD",     tf:"4H" },
+  macd15:   { label:"MACD + EMA120 · 15m", exec:"m15", need:["15m"],      kind:"MACD",     tf:"15m" },
+};
+const IV_TF = { "15m":"m15", "1h":"h1", "4h":"h4", "1d":"d1", "1w":"w1" };
+
+function rbtSeries(bars, tfKey){
+  return { bars, idx:-1, cap:TF[tfKey].cap, lr:TF[tfKey].lr, cache:null, cachedIdx:-2 };
+}
+/** Advance to the last bar that had CLOSED at or before time T. */
+function rbtAdvance(s, T){
+  while (s.idx+1 < s.bars.length && s.bars[s.idx+1].ct <= T) s.idx++;
+  return s.idx;
+}
+function rbtAnalyze(s){
+  if (s.idx < 30) return null;
+  if (s.cachedIdx === s.idx) return s.cache;
+  const from = Math.max(0, s.idx - s.cap + 1);
+  s.cache = analyze(s.bars.slice(from, s.idx+1), s.lr);
+  s.cachedIdx = s.idx;
+  return s.cache;
+}
+
+async function startRealBacktest(){
+  if (RBT.running || BT.running) return;
+  const cfg = { ...RBT.cfg, assets:[...RBT.cfg.assets], strats:[...RBT.cfg.strats] };
+  if (!cfg.assets.length || !cfg.strats.length){
+    toast("請至少選一個幣種與一個策略。","r"); return;
+  }
+  RBT.running = true; RBT.cancel = false; RBT.pct = 0; RBT.res = null;
+  RBT.phase = "下載真實 K 線…";
+  S.paused = true; S.btMode = true;
+  if (S.view === "backtest") V.backtest.refresh();
+
+  const live = { mkt:S.mkt, acct:S.acct, positions:S.positions, closed:S.closed,
+                 orders:S.orders, breaker:S.breaker, strat:S.strat, killed:S.killed, ex:S.ex };
+  const restore = () => {
+    S.mkt=live.mkt; S.acct=live.acct; S.positions=live.positions; S.closed=live.closed;
+    S.orders=live.orders; S.breaker=live.breaker; S.strat=live.strat;
+    S.killed=live.killed; S.ex=live.ex;
+    S.paused=false; S.btMode=false; RBT.running=false;
+  };
+
+  try {
+    const needIv = [...new Set(cfg.strats.flatMap(k => STRATS[k].need))];
+    const endMs = Date.now();
+    const wantMs = endMs - cfg.years*365*864e5;
+    const W = {}, meta = {};
+
+    // ---- download ------------------------------------------------
+    let done = 0;
+    const totalJobs = cfg.assets.length * needIv.length;
+    for (const a of cfg.assets){
+      const sym = RBT_SYM[a];
+      const listed = await binanceListedAt(sym);
+      const startMs = Math.max(wantMs, listed || wantMs);
+      meta[a] = { listed, startMs, sym };
+      W[a] = { tf:{}, series:{}, last:0, prev:0, dayOpen:0, barIdx:0,
+               cross:{m15:null,h4:null},
+               seen:{m15:{bar:-1,above:null}, h4:{bar:-1,above:null}} };
+      for (const iv of needIv){
+        if (RBT.cancel) throw new Error("__cancel");
+        RBT.phase = `下載 ${a} ${iv} …`;
+        if (S.view === "backtest") V.backtest.refresh();
+        const bars = await binanceKlines(sym, iv, startMs, endMs, (n,p)=>{
+          RBT.pct = (done + p) / totalJobs * 0.55;
+          if (S.view === "backtest") V.backtest.progress();
+        });
+        if (bars.length < 60) throw new Error(`${a} ${iv} 資料不足(${bars.length} 根)`);
+        W[a].series[IV_TF[iv]] = rbtSeries(bars, IV_TF[iv]);
+        done++; RBT.pct = done/totalJobs*0.55;
+      }
+      // playbook also reads 15m only through TF registry defaults; ensure absent
+      // frames simply stay undefined rather than being faked.
+    }
+
+    // ---- account -------------------------------------------------
+    S.mkt = W;
+    S.acct = { start:cfg.equity, equity:cfg.equity, realized:0, fees:0,
+               dayAnchor:cfg.equity, weekAnchor:cfg.equity, peak:cfg.equity };
+    S.positions = []; S.closed = []; S.orders = []; S.killed = false;
+    S.breaker = { daily:false, weekly:false, streak:false, cooldownUntil:0, streakCount:0, tradesToday:0 };
+    S.strat = {
+      playbook:{ on:cfg.strats.includes("playbook"),
+                 alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])) },
+      macd:{ on:cfg.strats.some(k=>k.startsWith("macd")),
+             alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])),
+             tf:{ m15:cfg.strats.includes("macd15"), h4:cfg.strats.includes("macd4h") },
+             fast:live.strat.macd.fast, slow:live.strat.macd.slow,
+             signal:live.strat.macd.signal, trendLen:live.strat.macd.trendLen,
+             maxDist:live.strat.macd.maxDist, rr:live.strat.macd.rr },
+      dualma:{ on:cfg.strats.some(k=>k.startsWith("dualma")),
+               alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])),
+               tf:{ m15:cfg.strats.includes("dualma15"), h4:cfg.strats.includes("dualma4h") },
+               fast:live.strat.dualma.fast, slow:live.strat.dualma.slow,
+               adxMin:live.strat.dualma.adxMin, volMult:live.strat.dualma.volMult,
+               useTrendFilter:live.strat.dualma.useTrendFilter } };
+    S.ex = { binance:{on:true,key:"bt",secret:"bt",pass:"",lat:40,tier:"VIP 1",testing:false},
+             bitget:{on:false,key:"",secret:"",pass:"",lat:null,tier:null,testing:false} };
+
+    // ---- global clock -------------------------------------------
+    // The clock must tick at the FINEST execution timeframe in use, or a
+    // strategy running on a faster frame never sees its own bar closes.
+    const RANK = { m15:0, h1:1, h4:2 };
+    const fine = cfg.strats.map(k=>STRATS[k].exec)
+                           .sort((a,b)=>RANK[a]-RANK[b])[0];
+    const step = { m15:KL_MS["15m"], h1:KL_MS["1h"], h4:KL_MS["4h"] }[fine];
+    const clockBars = W[cfg.assets[0]].series[fine].bars;
+    const t0 = clockBars[0].ct, t1 = clockBars[clockBars.length-1].ct;
+    const curve = [], monthly = [];
+    let monthAnchor = cfg.equity, lastDay = -1, lastMonth = -1, exposure = 0, steps = 0;
+
+    const execTFs = [...new Set(cfg.strats.map(k=>STRATS[k].exec))];
+
+    await new Promise((resolve, reject) => {
+      let T = t0;
+      const CHUNK = fine==="m15" ? 4000 : 1500;
+      function run(){
+        if (RBT.cancel) return reject(new Error("__cancel"));
+        let n = 0;
+        while (T <= t1 && n++ < CHUNK){
+          // advance every timeframe strictly by close time
+          for (const a of cfg.assets){
+            const w = W[a];
+            let px = null;
+            for (const k in w.series){
+              const s = w.series[k];
+              const moved = rbtAdvance(s, T);
+              if (moved >= 0){
+                w.tf[k] = rbtAnalyze(s);
+                if (w.tf[k]) w.tf[k].barIdx = moved;
+              }
+              if (k === fine && moved >= 0) px = s.bars[moved].c;
+            }
+            if (px !== null){ w.prev = w.last || px; w.last = px; }
+            w.ind = w.tf.h4 || w.tf.m15;
+            // bar-close cross latch, per timeframe
+            DUALMA_TFS.forEach(k=>{
+              const I = w.tf[k]; if (!I) return;
+              const sn = w.seen[k];
+              if (sn.bar !== I.barIdx){
+                sn.bar = I.barIdx;
+                const above = I.fast > I.slow;
+                if (sn.above !== null && above !== sn.above)
+                  w.cross[k] = { dir: above?"UP":"DOWN", at:I.barIdx };
+                sn.above = above;
+              }
+            });
+          }
+
+          rbtManage(cfg, W, T);
+          S.acct.equity = S.acct.start + S.acct.realized + unrealized();
+          S.acct.peak = Math.max(S.acct.peak, S.acct.equity);
+
+          const d = new Date(T);
+          const dayN = Math.floor(T/864e5);
+          if (dayN !== lastDay){
+            lastDay = dayN;
+            S.breaker.tradesToday = 0; S.acct.dayAnchor = S.acct.equity;
+            S.breaker.daily = false; S.breaker.cooldownUntil = 0;
+            if (S.breaker.streak){ S.breaker.streak=false; S.breaker.streakCount=0; }
+            curve.push(S.acct.equity);
+            if (dayN % 7 === 0){ S.acct.weekAnchor = S.acct.equity; S.breaker.weekly = false; }
+          }
+          const mo = d.getUTCFullYear()*12 + d.getUTCMonth();
+          if (lastMonth < 0) lastMonth = mo;
+          else if (mo !== lastMonth){
+            monthly.push((S.acct.equity-monthAnchor)/monthAnchor);
+            monthAnchor = S.acct.equity; lastMonth = mo;
+          }
+          checkBreakers();
+          if (S.positions.length) exposure++;
+          steps++;
+
+          rbtSignals(cfg, W, T, execTFs, fine);
+          T += step;
+        }
+        RBT.pct = 0.55 + 0.45*Math.min(1,(T-t0)/(t1-t0));
+        RBT.phase = `回測中 ${new Date(Math.min(T,t1)).toISOString().slice(0,10)}`;
+        if (S.view === "backtest") V.backtest.progress();
+        if (T > t1) return resolve();
+        setTimeout(run, 0);
+      }
+      run();
+    });
+
+    // ---- results -------------------------------------------------
+    const trades = S.closed.slice().reverse();
+    const days = Math.max(1, (t1-t0)/864e5);
+    const res = btMetrics(trades, curve, cfg, days);
+    res.curve = curve; res.monthly = monthly; res.tradeList = trades;
+    res.cfg = cfg; res.real = true;
+    res.from = new Date(t0).toISOString().slice(0,10);
+    res.to = new Date(t1).toISOString().slice(0,10);
+    res.meta = meta;
+    res.exposure = steps ? exposure/steps : 0;
+    res.breakerTrips = S.logs.filter(l=>l.msg.includes("CIRCUIT BREAKER")).length;
+    res.seed = "真實市場";
+    restore();
+    RBT.res = res; BT.res = res; RBT.pct = 1; RBT.phase = "完成";
+    log("INFO", `真實回測完成 — ${cfg.assets.join("/")} · ${res.from}~${res.to} · `
+      + `${res.trades} 筆 · 報酬 ${pct(res.totalReturn)} · 最大回撤 ${pct(res.maxDD)}`);
+    toast(`<b>真實市場回測完成</b><br><span style="font-family:var(--mono);font-size:11px">`
+      + `${res.trades} 筆 · ${pct(res.totalReturn)} · 最大回撤 ${pct(res.maxDD)}</span>`,
+      res.totalReturn>=0?"g":"r", 8000);
+  } catch(e){
+    restore();
+    RBT.pct = 0;
+    if (e.message === "__cancel"){ RBT.phase = "已取消"; log("WARN","真實回測已取消。"); }
+    else {
+      RBT.phase = "失敗:" + e.message;
+      log("ERR", "真實回測失敗 — " + e.message);
+      toast(`<b>回測失敗</b><br><span style="font-size:11.5px">${esc(e.message)}</span>`,"r",9000);
+    }
+  }
+  if (S.view === "backtest") switchView("backtest"); else repaint();
+}
+
+/** Stops/targets against the bar that just closed. */
+function rbtManage(cfg, W, T){
+  [...S.positions].forEach(p => {
+    const w = W[p.asset];
+    const s = w.series[STRATS[p.stratKey].exec];
+    if (!s || s.idx < 0) return;
+    const b = s.bars[s.idx];
+    if (b.ct <= p.openedAt) return;               // never exit on the entry bar
+    const long = p.side === "LONG";
+    const hitSL = long ? b.l <= p.sl : b.h >= p.sl;
+    const hitTP = long ? b.h >= p.tp : b.l <= p.tp;
+    const hitLQ = long ? b.l <= p.liq : b.h >= p.liq;
+    // Intrabar order is unknowable from OHLC — assume the loss first.
+    if (hitSL) return closePosition(p, "STOP LOSS", p.sl);
+    if (hitLQ) return closePosition(p, "LIQUIDATION", p.liq);
+    if (hitTP) return closePosition(p, "TAKE PROFIT", p.tp);
+  });
+}
+
+function rbtSignals(cfg, W, T, execTFs, fine){
+  if (tradingBlocked()) return;
+  for (const a of cfg.assets){
+    const w = W[a];
+    if (S.positions.some(p=>p.asset===a)) continue;
+    if (!w.tf.h4 && !w.tf.m15) continue;
+    for (const sk of cfg.strats){
+      const meta = STRATS[sk];
+      const s = w.series[meta.exec];
+      if (!s || s.idx < 0) continue;
+      if (s.bars[s.idx].ct !== T) continue;        // only act on that TF's close
+      let sig = null;
+      if (sk === "playbook"){
+        const P = PB_TFS[PLAYBOOK_TF];
+        if (!w.tf[P.exec] || !w.tf[P.htf] || !w.tf[P.top]) continue;
+        sig = evalPlaybook(a);
+      } else if (meta.kind === "MACD"){
+        if (!w.tf[meta.exec]) continue;
+        sig = evalMacd(a, meta.exec);
+      } else {
+        const k = meta.exec;
+        if (!w.tf[k]) continue;
+        sig = evalDualMA(a, k);
+      }
+      if (sig && sig.ok){
+        openPosition(a, meta.kind, sig);
+        const p = S.positions[S.positions.length-1];
+        if (p){ p.stratKey = sk; p.openedAt = T; p.tf = meta.tf; }
+        break;
+      }
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- *
+ * 12e. 後端連線 BACKEND (Rust signing proxy)
+ * ------------------------------------------------------------------
+ * The page never holds an exchange secret. When the Rust service is
+ * running it reports the real account equity, and — only if that service
+ * was started with LIVE_TRADING=true — it can place orders on the
+ * dashboard's behalf. Nothing here can arm live trading; that lock lives
+ * in the server's .env and needs a restart.
+ * ---------------------------------------------------------------- */
+const BE = {
+  url: "http://127.0.0.1:8787",
+  up: false, checking: false,
+  trading: false, dryRun: true, maxNotional: 0,
+  bal: null, err: "", lastAt: 0,
+};
+
+async function beHealth(){
+  if (BE.checking) return;
+  BE.checking = true;
+  try {
+    const r = await fetch(`${BE.url}/health`, { cache:"no-store" });
+    if (!r.ok) throw new Error("HTTP "+r.status);
+    const h = await r.json();
+    BE.up = true; BE.err = "";
+    BE.trading = !!h.trading_enabled;
+    BE.dryRun = h.dry_run !== false;
+    BE.maxNotional = h.max_order_notional_usdt || 0;
+  } catch(e){
+    BE.up = false; BE.trading = false; BE.err = String(e.message || e);
+  }
+  BE.checking = false;
+}
+
+async function beBalance(){
+  if (!BE.up) return;
+  try {
+    const r = await fetch(`${BE.url}/api/balance`, { cache:"no-store" });
+    const j = await r.json();
+    BE.bal = j; BE.lastAt = Date.now();
+  } catch(e){ BE.err = String(e.message || e); }
+}
+
+/** Live equity from the exchanges, or null when the backend is not running. */
+function beEquity(){
+  return (BE.up && BE.bal && isFinite(BE.bal.total_equity)) ? BE.bal.total_equity : null;
+}
+
+function beStatusChip(){
+  if (!BE.up)      return '<span class="chip n">後端未連線</span>';
+  if (!BE.trading) return '<span class="chip b">後端已連線 · 唯讀</span>';
+  if (BE.dryRun)   return '<span class="chip a">實盤已解鎖 · 乾跑中</span>';
+  return '<span class="chip r">⚠ 實盤下單已啟用</span>';
+}
+
 /* ------------------------------ 主控台 CONSOLE ------------------ */
 /* One operating screen: is it running, what is my money doing, what is
    open, stop it. Everything diagnostic lives behind a disclosure. */
@@ -2048,13 +2633,14 @@ V.console = {
       </div>
 
       <div class="grid g2" style="margin-bottom:12px">
-        <div class="big"><div class="k">總資產</div>
+        <div class="big"><div class="k">總資產 <span id="c-eq-src"></span></div>
           <div class="v" id="c-eq">—</div><div class="s" id="c-eq-s">—</div></div>
         <div class="big"><div class="k">總盈虧</div>
           <div class="v" id="c-pnl">—</div><div class="s" id="c-pnl-s">—</div></div>
       </div>
 
       <div class="minirow" id="c-mini"></div>
+      <div id="c-backend" style="margin-bottom:12px"></div>
 
       <div class="panel" style="margin-bottom:12px">
         <div class="ph"><span class="t">市場與策略狀態</span>
@@ -2105,9 +2691,17 @@ V.console = {
     const dayPnl = S.acct.equity - S.acct.dayAnchor;
     const wins = S.closed.filter(c=>c.pnl>0).length;
 
-    const eq = $("#c-eq"), eqs = $("#c-eq-s");
-    if (eq){ eq.textContent = usd(S.acct.equity); eq.className = "v"; }
-    if (eqs) eqs.textContent = `起始 ${usd(S.acct.start,0)}`;
+    const realEq = beEquity();
+    const eq = $("#c-eq"), eqs = $("#c-eq-s"), esrc = $("#c-eq-src");
+    if (eq){
+      eq.textContent = realEq !== null ? usd(realEq) : usd(S.acct.equity);
+      eq.className = "v" + (realEq !== null ? " acc" : "");
+    }
+    if (esrc) esrc.innerHTML = realEq !== null
+      ? '<span class="chip b">交易所真實餘額</span>' : '<span class="chip n">模擬</span>';
+    if (eqs) eqs.textContent = realEq !== null
+      ? `Binance ${usd(BE.bal.binance.equity,0)} · Bitget ${usd(BE.bal.bitget.equity,0)}`
+      : `起始 ${usd(S.acct.start,0)}`;
     const pn = $("#c-pnl"), pns = $("#c-pnl-s");
     if (pn){ pn.textContent = sgn(total); pn.className = "v " + cls(total); }
     if (pns) pns.textContent = pct(total/S.acct.start);
@@ -2118,6 +2712,24 @@ V.console = {
       <div><div class="k">持倉</div><div class="v">${S.positions.length}</div></div>
       <div><div class="k">已完成</div><div class="v">${S.closed.length} 筆</div></div>
       <div><div class="k">勝率</div><div class="v">${S.closed.length?((wins/S.closed.length)*100).toFixed(0)+"%":"—"}</div></div>`);
+
+    setHTML("#c-backend", !BE.up
+      ? `<div class="note info" style="font-size:11.5px">
+          <b>後端未連線</b> — 目前顯示的是模擬帳戶。
+          啟動 <code>rust-backend</code> 後即可顯示交易所真實資產。
+          ${BE.err?`<br><span class="t4">${esc(BE.err)}</span>`:""}</div>`
+      : BE.trading && !BE.dryRun
+      ? `<div class="note bad" style="font-size:11.5px">
+          <b>⚠ 實盤下單已啟用</b> — 這個機器人會用真實資金在交易所下單,
+          單筆名目上限 ${usd(BE.maxNotional,0)}。要停用請編輯後端 .env 的
+          <code>LIVE_TRADING</code> 並重啟服務。</div>`
+      : BE.trading
+      ? `<div class="note warn" style="font-size:11.5px">
+          <b>實盤已解鎖,但目前為乾跑</b> — 委託會完整驗證與簽章並寫入日誌,
+          但<b>不會送到交易所</b>。確認日誌無誤後再把 <code>DRY_RUN</code> 設為 false。</div>`
+      : `<div class="note good" style="font-size:11.5px">
+          <b>後端已連線(唯讀)</b> — 可讀取真實餘額,但無法下單。
+          總資產顯示的是交易所實際數字。</div>`);
 
     setHTML("#c-assets", ASSETS.map(a=>{
       const m = S.mkt[a], c = CFG.assets[a];
@@ -2392,7 +3004,7 @@ function logCurve(vals, w=900, h=230){
   // running peak → drawdown shading
   let pk=vals[0]; const dd=[];
   for(let i=0;i<vals.length;i+=step){ pk=Math.max(pk,vals[i]); dd.push(`${X(i).toFixed(1)},${Y(pk).toFixed(1)}`); }
-  const yrTicks=[]; const yrs=BT.res?BT.res.cfg.years:10;
+  const yrTicks=[]; const yrs=BT.res?Math.max(1,Math.round(BT.res.days/365)):10;
   for(let y=0;y<=yrs;y++){
     const i=Math.min(vals.length-1,Math.round(y*365));
     yrTicks.push(`<text x="${X(i)}" y="${h-6}" fill="var(--tx4)" font-size="9" font-family="var(--mono)" text-anchor="middle">Y${y}</text>`);
@@ -2468,16 +3080,50 @@ V.backtest = {
       <div class="panel">
         <div class="ph"><span class="t">設定</span></div>
         <div class="pb">
+          <div class="fld"><label class="fl">資料來源</label>
+            <div class="seg" style="width:100%;display:flex">
+              <button style="flex:1" class="${S.btSrc==="real"?"act grn":""}"
+                data-action="bt-src" data-v="real">真實市場</button>
+              <button style="flex:1" class="${S.btSrc!=="real"?"act warn":""}"
+                data-action="bt-src" data-v="sim">模擬</button>
+            </div></div>
+
+          <div class="fld"><label class="fl">幣種(可複選 · ${RBT.cfg.assets.length} 已選)</label>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              ${Object.keys(UNIVERSE).map(a=>`<button class="btn sm ${RBT.cfg.assets.includes(a)?"grn":""}"
+                data-action="bt-asset" data-a="${a}">${a}</button>`).join("")}
+            </div>
+            <div style="display:flex;gap:6px;margin-top:6px">
+              <button class="btn sm" style="flex:1;justify-content:center" data-action="bt-asset-all">全選 12</button>
+              <button class="btn sm" style="flex:1;justify-content:center" data-action="bt-asset-core">只留 BTC/ETH/SOL</button>
+            </div></div>
+
+          <div class="fld"><label class="fl">策略(可複選)</label>
+            ${Object.entries(STRATS).map(([k,v])=>`
+              <button class="btn sm ${RBT.cfg.strats.includes(k)?"pri":""}"
+                style="width:100%;justify-content:flex-start;margin-bottom:5px"
+                data-action="bt-strat" data-k="${k}">${v.label}</button>`).join("")}
+          </div>
+
           <div class="grid g2" style="gap:9px">
             <div class="fld" style="margin:0"><label class="fl">年數</label>
-              <input type="number" id="bt-years" min="1" max="20" value="${c.years}"></div>
+              <input type="number" id="bt-years" min="1" max="20"
+                value="${S.btSrc==="real"?RBT.cfg.years:c.years}"></div>
             <div class="fld" style="margin:0"><label class="fl">起始資金</label>
-              <input type="number" id="bt-eq" min="100" value="${c.equity}"></div>
+              <input type="number" id="bt-eq" min="100"
+                value="${S.btSrc==="real"?RBT.cfg.equity:c.equity}"></div>
           </div>
-          <div class="fld"><label class="fl">市場情境</label>
+
+          <div class="fld ${S.btSrc==="real"?"hide":""}"><label class="fl">市場情境</label>
             <select id="bt-regime">${Object.entries(BT_REGIMES).map(([k,v])=>
               `<option value="${k}" ${k===c.regime?"selected":""}>${v.label}</option>`).join("")}</select></div>
-          <div class="note info" style="margin-top:2px;font-size:11px">
+
+          <div class="note ${S.btSrc==="real"?"good":"info"}" style="margin-top:2px;font-size:11px">
+            ${S.btSrc==="real"
+              ? `使用 <b>Binance 真實 K 線</b>。高週期一律依「收盤時間」推進,
+                 4H 的判斷只看得到當下<b>已經收盤</b>的日線與週線,沒有未來函數。
+                 同一根 K 棒同時觸及止損與止盈時,一律<b>視為先觸及止損</b>。`
+              : `使用本機隨機模型產生的合成資料。`}
             風險規則沿用實盤引擎:單筆 1%、止損 2×ATR、最低盈虧比 1:2、20× 逐倉、
             單邊手續費 ${(CFG.takerFee*1e4).toFixed(1)} bps。
           </div>
@@ -2521,17 +3167,25 @@ V.backtest = {
 
   progress(){
     const el = $("#bt-run"); if (!el) return;
-    if (BT.running){
+    const busy = BT.running || RBT.running;
+    const pct_ = BT.running ? BT.pct : RBT.pct;
+    const ph   = BT.running ? BT.phase : RBT.phase;
+    if (busy){
       el.innerHTML = `
-        <div class="bar" style="height:7px"><i style="width:${(BT.pct*100).toFixed(1)}%;background:var(--acc)"></i></div>
-        <div class="mono t3" style="font-size:10.5px;margin-top:6px">${esc(BT.phase)} · ${(BT.pct*100).toFixed(1)}%</div>
+        <div class="bar" style="height:7px"><i style="width:${(pct_*100).toFixed(1)}%;background:var(--acc)"></i></div>
+        <div class="mono t3" style="font-size:10.5px;margin-top:6px">${esc(ph)} · ${(pct_*100).toFixed(1)}%</div>
         <button class="btn sm red" style="width:100%;justify-content:center;margin-top:8px"
           data-action="bt-cancel">取消</button>`;
     } else {
+      const yrs = S.btSrc==="real" ? RBT.cfg.years : BT.cfg.years;
       el.innerHTML = `<button class="btn pri" style="width:100%;justify-content:center"
-        data-action="bt-run">▶ 執行 ${BT.cfg.years} 年回測</button>
+        data-action="bt-run">▶ 執行 ${yrs} 年${S.btSrc==="real"?"真實":"模擬"}回測</button>
+        ${RBT.phase && RBT.phase.startsWith("失敗")
+          ? `<div class="dn" style="font-size:11px;margin-top:7px;text-align:center">${esc(RBT.phase)}</div>` : ""}
         ${BT.res?`<div class="mono t4" style="font-size:10px;margin-top:7px;text-align:center">
-          seed ${esc(BT.res.seed)} · ${BT.res.cfg.years}y · ${BT_REGIMES[BT.res.cfg.regime].label}</div>`:""}`;
+          ${BT.res.real
+            ? `真實 · ${BT.res.cfg.assets.join("/")} · ${BT.res.from}~${BT.res.to}`
+            : `seed ${esc(BT.res.seed)} · ${BT.res.cfg.years}y · ${BT_REGIMES[BT.res.cfg.regime].label}`}</div>`:""}`;
     }
   },
 
@@ -2560,7 +3214,9 @@ V.backtest = {
     ].join(""));
 
     const s = $("#bt-curve-s");
-    if (s) s.textContent = `${r.cfg.years}y · ${BT_REGIMES[r.cfg.regime].label} · seed ${r.seed}`;
+    if (s) s.textContent = r.real
+      ? `真實市場 · ${r.cfg.assets.join(" / ")} · ${r.from} ~ ${r.to}`
+      : `${r.cfg.years}y · ${BT_REGIMES[r.cfg.regime].label} · seed ${r.seed}`;
     setHTML("#bt-curve", logCurve(r.curve));
 
     const row = (k,v,c2="") => `<div class="kv"><span class="k">${k}</span><span class="v ${c2}">${v}</span></div>`;
@@ -2719,6 +3375,24 @@ V.setup = {
             <label class="sw"><input type="checkbox" data-action="strat-toggle" data-s="dualma"
               ${S.strat.dualma.on?"checked":""}><span class="tr"></span></label>
           </div>
+          <div class="stratrow">
+            <div class="info">
+              <div class="a">MACD + EMA${S.strat.macd.trendLen}
+                ${DUALMA_TFS.filter(k=>S.strat.macd.tf[k]).map(k=>
+                  `<span class="chip ${k==="m15"?"b":"v"}">${TF[k].label}</span>`).join("")}</div>
+              <div class="b">EMA${S.strat.macd.trendLen} 決定方向:價格在上只做多、在下只做空。
+                MACD 訊號線交叉負責進場時機,柱狀圖需同向增強,且乖離超過
+                ${S.strat.macd.maxDist}×ATR 就不追。</div>
+            </div>
+            <div class="pick">
+              ${ASSETS.map(a=>`<button class="btn sm ${S.strat.macd.alloc[a]?"grn":""}"
+                data-action="alloc" data-s="macd" data-a="${a}">${a}</button>`).join("")}
+              ${DUALMA_TFS.map(k=>`<button class="btn sm ${S.strat.macd.tf[k]?"pri":""}"
+                data-action="macd-tf" data-k="${k}">${TF[k].label}</button>`).join("")}
+            </div>
+            <label class="sw"><input type="checkbox" data-action="strat-toggle" data-s="macd"
+              ${S.strat.macd.on?"checked":""}><span class="tr"></span></label>
+          </div>
         </div></div>
       </div>
 
@@ -2852,8 +3526,12 @@ function switchView(v){
 const ENGINE_ZH = { IDLE:"閒置", RUNNING:"執行中", HALTED:"已暫停", KILLED:"已停止" };
 
 function paintHeader(){
+  const realEq = beEquity();
   const total = S.acct.equity - S.acct.start;
-  $("#h-equity").textContent = usd(S.acct.equity);
+  // Real exchange equity supersedes the simulated figure, and is labelled so
+  // the two can never be confused for one another.
+  $("#h-equity").textContent = realEq !== null ? usd(realEq) : usd(S.acct.equity);
+  $("#h-equity").className = "v" + (realEq !== null ? " acc" : "");
   const p = $("#h-pnl"); p.textContent = sgn(total); p.className = "v " + cls(total);
 
   // one connection indicator instead of one chip per venue
@@ -2985,6 +3663,16 @@ document.addEventListener("click", e => {
 
     case "strat-toggle": break; // handled on change
 
+    case "macd-tf": {
+      const k = t.dataset.k, tfc = S.strat.macd.tf;
+      if (tfc[k] && DUALMA_TFS.filter(x=>tfc[x]).length === 1){
+        toast("MACD 至少要保留一個週期。","a"); break;
+      }
+      tfc[k] = !tfc[k];
+      log("INFO", `MACD ${TF[k].label} 週期${tfc[k]?"啟用":"停用"}。`);
+      switchView("setup"); break;
+    }
+
     case "dm-tf": {
       const k = t.dataset.k, tfc = S.strat.dualma.tf;
       if (tfc[k] && DUALMA_TFS.filter(x=>tfc[x]).length === 1){
@@ -3044,7 +3732,39 @@ document.addEventListener("click", e => {
 
     case "calc-sync": syncCalc(); calcSizing(); break;
 
+    case "bt-src": S.btSrc = t.dataset.v; switchView("backtest"); break;
+
+    case "bt-asset-all":
+      RBT.cfg.assets = Object.keys(UNIVERSE); switchView("backtest"); break;
+    case "bt-asset-core":
+      RBT.cfg.assets = ["BTC","ETH","SOL"]; switchView("backtest"); break;
+
+    case "bt-asset": {
+      const a = t.dataset.a, L = RBT.cfg.assets;
+      const i = L.indexOf(a);
+      if (i >= 0){ if (L.length === 1){ toast("至少要選一個幣種。","a"); break; } L.splice(i,1); }
+      else L.push(a);
+      switchView("backtest"); break;
+    }
+
+    case "bt-strat": {
+      const k = t.dataset.k, L = RBT.cfg.strats;
+      const i = L.indexOf(k);
+      if (i >= 0){ if (L.length === 1){ toast("至少要選一個策略。","a"); break; } L.splice(i,1); }
+      else L.push(k);
+      switchView("backtest"); break;
+    }
+
     case "bt-run": {
+      if (S.btSrc === "real"){
+        const y = parseFloat(($("#bt-years")||{}).value);
+        const q = parseFloat(($("#bt-eq")||{}).value);
+        RBT.cfg.years  = clamp(isFinite(y)?y:4, 0.25, 20);
+        RBT.cfg.equity = Math.max(100, isFinite(q)?q:10000);
+        startRealBacktest();
+        V.backtest.progress();
+        break;
+      }
       const num = (id,d) => { const v = parseFloat(($("#"+id)||{}).value); return isFinite(v)?v:d; };
       BT.cfg.years   = clamp(Math.round(num("bt-years",10)),1,20);
       BT.cfg.equity  = Math.max(100, num("bt-eq",10000));
@@ -3063,7 +3783,7 @@ document.addEventListener("click", e => {
       V.backtest.progress();
       break;
     }
-    case "bt-cancel": BT.cancel = true; toast("正在取消回測…","a"); break;
+    case "bt-cancel": BT.cancel = true; RBT.cancel = true; toast("正在取消回測…","a"); break;
     case "bt-export": {
       if (!BT.res) break;
       const head = "closed_bar,asset,exchange,strategy,timeframe,side,entry,exit,qty,notional,margin,sl,tp,pnl,r_multiple,reason,trigger";
@@ -3232,7 +3952,11 @@ function boot(){
   ASSETS.forEach(a=>{
     evalCache.playbook[a] = evalPlaybook(a);
     evalCache.dualma[a] = {};
-    DUALMA_TFS.forEach(k => { evalCache.dualma[a][k] = evalDualMA(a, k); });
+    evalCache.macd[a] = {};
+    DUALMA_TFS.forEach(k => {
+      evalCache.dualma[a][k] = evalDualMA(a, k);
+      evalCache.macd[a][k]   = evalMacd(a, k);
+    });
   });
   S.equityCurve.push(S.acct.equity);
 
@@ -3246,6 +3970,7 @@ function boot(){
   switchView("console");
   paintHeader();
   liveConnect();      // public market data only — no key, no account access
+  beHealth().then(()=>{ if (BE.up) beBalance(); });
 
   setInterval(() => {
     // A backtest swaps S.mkt / S.acct / S.positions for its own world; the live
@@ -3253,6 +3978,10 @@ function boot(){
     if (S.paused){ if (S.view === "backtest") V.backtest.progress(); return; }
     tickPrices();
     jitterLatency();
+    if (!BE.checking && Date.now()-BE.lastAt > 5000){
+      beHealth().then(()=>{ if (BE.up) beBalance(); });
+      BE.lastAt = Date.now();
+    }
     if (Date.now() - S.lastBar > CFG.barMs){ S.lastBar = Date.now(); rollBar(); }
     runEngine();
     repaint();

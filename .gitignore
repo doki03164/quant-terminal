@@ -37,3 +37,7 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# Rust backend — .env holds live exchange API secrets
+rust-backend/.env
+rust-backend/target/
