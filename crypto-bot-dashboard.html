@@ -2687,6 +2687,130 @@ function cfgImportFile(file){
   fr.readAsText(file);
 }
 
+/* ---------------------------------------------------------------- *
+ * 12g. .env 編輯 BACKEND ENV EDITOR
+ * ------------------------------------------------------------------
+ * Saves a trip to a text editor for keys, caps and endpoints. The server
+ * decides what is writable — this UI only renders what it is told, and
+ * the one-way locks (LIVE_TRADING can only be turned off, DRY_RUN only
+ * on) are enforced there, not here, because a check that lives only in
+ * the browser is not a check at all.
+ * ---------------------------------------------------------------- */
+const ENVED = { loaded:false, data:null, err:"", busy:false, dirty:{} };
+
+async function envLoad(){
+  ENVED.busy = true; ENVED.err = "";
+  try {
+    const r = await fetch(`${BE.url}/api/env`, { cache:"no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    ENVED.data = await r.json();
+    ENVED.loaded = true; ENVED.dirty = {};
+  } catch(e){
+    ENVED.loaded = false; ENVED.err = String(e.message || e);
+  }
+  ENVED.busy = false;
+  if (S.view === "setup") V.setup.refresh();
+}
+
+async function envSave(){
+  if (!ENVED.data) return;
+  const vals = {};
+  Object.keys(ENVED.dirty).forEach(k => { vals[k] = ENVED.dirty[k]; });
+  if (!Object.keys(vals).length){ toast("沒有變更。","a"); return; }
+  ENVED.busy = true;
+  try {
+    const r = await fetch(`${BE.url}/api/env`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ values: vals }),
+    });
+    const j = await r.json();
+    const rej = j.rejected || {};
+    const rejKeys = Object.keys(rej);
+    if (j.written && j.written.length){
+      log("WARN", `.env 已更新:${j.written.join(", ")}`);
+      toast(`<b>已寫入 ${j.written.length} 項設定</b>`
+        + (j.restart_required
+            ? `<br><span style='font-size:11.5px'>API 金鑰需要<b>重啟後端</b>才會生效。</span>` : ""),
+        "g", 7000);
+    }
+    if (rejKeys.length){
+      rejKeys.forEach(k => log("ERR", `.env ${k} 被拒絕 — ${rej[k]}`));
+      toast(`<b>${rejKeys.length} 項被拒絕</b><br>`
+        + `<span style='font-size:11.5px'>${esc(rej[rejKeys[0]])}</span>`, "r", 10000);
+    }
+  } catch(e){
+    toast("寫入失敗:"+esc(String(e.message||e)),"r");
+  }
+  ENVED.busy = false;
+  await envLoad();
+  beHealth();
+}
+
+const ENV_LABEL = {
+  BINANCE_API_KEY:"Binance API Key", BINANCE_API_SECRET:"Binance Secret",
+  BITGET_API_KEY:"Bitget API Key", BITGET_API_SECRET:"Bitget Secret",
+  BITGET_PASSPHRASE:"Bitget Passphrase",
+  MAX_ORDER_NOTIONAL_USDT:"單筆名目上限 (USDT)",
+  DAEMON_INTERVAL_SECS:"背景評估間隔 (秒)",
+  BINANCE_BASE:"Binance API 位址", BITGET_BASE:"Bitget API 位址",
+  PORT:"服務埠號", LIVE_TRADING:"實盤下單", DRY_RUN:"乾跑模式",
+};
+
+function envEditorHTML(){
+  if (!BE.up)
+    return `<div class="note info" style="font-size:11.5px">
+      後端未連線,無法編輯。請先啟動 <code>rust-backend</code>。</div>`;
+  if (ENVED.err)
+    return `<div class="note bad" style="font-size:11.5px">讀取失敗:${esc(ENVED.err)}</div>`;
+  if (!ENVED.loaded)
+    return `<div class="empty" style="padding:18px">讀取中…</div>`;
+
+  const v = ENVED.data.values || {};
+  const w = ENVED.data.writable || [];
+  const row = (k) => {
+    const cur = ENVED.dirty[k] !== undefined ? ENVED.dirty[k] : (v[k] || "");
+    const isSecret = /SECRET|PASSPHRASE|API_KEY/.test(k);
+    const changed = ENVED.dirty[k] !== undefined;
+    return `<div class="fld" style="margin-bottom:9px">
+      <label class="fl">${ENV_LABEL[k] || k}
+        ${changed?'<span class="acc">· 已修改</span>':''}</label>
+      <input type="${isSecret?"password":"text"}" value="${esc(cur)}"
+        placeholder="${isSecret?"(留空表示不變更)":""}"
+        data-action="env-field" data-k="${k}">
+    </div>`;
+  };
+  const toggle = (k, safeVal, note) => {
+    const cur = (ENVED.dirty[k] !== undefined ? ENVED.dirty[k] : (v[k] || "false")) === "true";
+    const canChange = String(cur) !== safeVal;   // only allowed toward the safe value
+    return `<div class="swrow" style="border-top:1px solid var(--line)">
+      <div class="txt"><div class="a">${ENV_LABEL[k]}
+        <span class="chip ${k==="LIVE_TRADING" ? (cur?"r":"g") : (cur?"g":"r")}">${cur?"開啟":"關閉"}</span></div>
+        <div class="b">${note}</div></div>
+      ${canChange
+        ? `<button class="btn sm ${k==="LIVE_TRADING"?"red":"grn"}"
+             data-action="env-safe" data-k="${k}" data-v="${safeVal}">
+             ${k==="LIVE_TRADING"?"立即關閉":"開啟乾跑"}</button>`
+        : `<span class="chip n">需手動改檔</span>`}
+    </div>`;
+  };
+
+  const keys = w.filter(k => !["LIVE_TRADING","DRY_RUN"].includes(k));
+  return `
+    <div class="grid g2" style="gap:0 14px">${keys.map(row).join("")}</div>
+    ${toggle("LIVE_TRADING","false","可從這裡關閉。<b>開啟必須手動編輯 .env 並重啟</b> —— 介面能開的鎖等於沒有鎖。")}
+    ${toggle("DRY_RUN","true","可從這裡開啟(較安全)。關閉必須手動編輯 .env。")}
+    <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+      <button class="btn pri" data-action="env-save" ${ENVED.busy?"disabled":""}>寫入 .env</button>
+      <button class="btn" data-action="env-reload">重新讀取</button>
+      <span class="mono t4" style="font-size:10px;margin-left:auto;align-self:center">
+        ${esc(ENVED.data.path || ".env")}</span>
+    </div>
+    <div class="note warn" style="margin-top:11px;font-size:11.5px">
+      金鑰是<b>遮蔽顯示</b>的,留空或不動即維持原值。修改金鑰後需<b>重啟後端</b>才生效。
+      金鑰會經由瀏覽器傳到本機服務 —— 請確認沒有安裝來路不明的瀏覽器擴充套件。
+    </div>`;
+}
+
 /* ------------------------------ 主控台 CONSOLE ------------------ */
 /* One operating screen: is it running, what is my money doing, what is
    open, stop it. Everything diagnostic lives behind a disclosure. */
@@ -3586,6 +3710,12 @@ V.setup = {
         </div></div>
       </div>
 
+      <div class="block">
+        <div class="bh"><span class="n">5 · 後端設定(.env)</span>
+          <span class="d">直接在這裡改,不用開檔案</span></div>
+        <div class="panel"><div class="pb" id="env-editor"></div></div>
+      </div>
+
       <details class="more">
         <summary>進階 — 雙均線參數</summary>
         <div class="inner">
@@ -3646,6 +3776,11 @@ V.setup = {
 
   refresh(){
     renderBreakers("#su-brk");
+    const ee = $("#env-editor");
+    if (ee){
+      ee.innerHTML = envEditorHTML();
+      if (BE.up && !ENVED.loaded && !ENVED.busy && !ENVED.err) envLoad();
+    }
     const cs = $("#cfg-status");
     if (cs){
       let saved = null;
@@ -3833,6 +3968,14 @@ document.addEventListener("click", e => {
       break;
 
     case "strat-toggle": break; // handled on change
+
+    case "env-reload": envLoad(); break;
+    case "env-save":   envSave(); break;
+    case "env-safe": {
+      ENVED.dirty[t.dataset.k] = t.dataset.v;
+      envSave();
+      break;
+    }
 
     case "cfg-save":   cfgSave(); V.setup.refresh(); break;
     case "cfg-load":   if (cfgLoad(false)) switchView("setup"); break;
@@ -4048,6 +4191,7 @@ document.addEventListener("input", e => {
   const t = e.target.closest("[data-action]");
   if (!t) return;
   if (t.dataset.action === "ex-field") S.ex[t.dataset.x][t.dataset.f] = t.value.trim();
+  if (t.dataset.action === "env-field") ENVED.dirty[t.dataset.k] = t.value;
   if (t.dataset.action === "logfilter") S.logFilter = t.value;
   if (t.dataset.action === "calc") calcSizing();
 });

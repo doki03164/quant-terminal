@@ -26,6 +26,7 @@ use std::{env, net::SocketAddr, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use tower_http::cors::CorsLayer;
 
 mod engine;
+mod envcfg;
 mod indicators;
 mod trade;
 use trade::{close_all, place, OrderReq, OrderResp};
@@ -246,6 +247,25 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Health> {
 #[derive(serde::Deserialize)]
 struct CloseReq { venue: String, symbol: String }
 
+async fn get_env() -> (StatusCode, Json<serde_json::Value>) {
+    match envcfg::read_view() {
+        Ok(v) => (StatusCode::OK, Json(serde_json::to_value(v).unwrap_or_default())),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(serde_json::json!({"ok":false,"error":e.to_string()}))),
+    }
+}
+
+async fn post_env(Json(u): Json<envcfg::EnvUpdate>) -> (StatusCode, Json<serde_json::Value>) {
+    match envcfg::write(u) {
+        Ok(r) => {
+            let code = if r.ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+            (code, Json(serde_json::to_value(r).unwrap_or_default()))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(serde_json::json!({"ok":false,"error":e.to_string()}))),
+    }
+}
+
 async fn post_order(State(st): State<Arc<AppState>>, Json(req): Json<OrderReq>)
     -> (StatusCode, Json<OrderResp>) {
     let keys = match req.venue.as_str() {
@@ -398,6 +418,7 @@ async fn main() -> Result<()> {
         .route("/api/balance", get(get_balance))
         .route("/api/order", axum::routing::post(post_order))
         .route("/api/close", axum::routing::post(post_close))
+        .route("/api/env", get(get_env).post(post_env))
         .with_state(state)
         .layer(cors);
 
