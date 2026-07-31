@@ -1,0 +1,3269 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QUANT TERMINAL — Crypto Auto-Trading Bot</title>
+<style>
+/* ============================================================
+   DESIGN TOKENS  (matched to 交易操作手冊 / 趨勢交易完整教學)
+   ============================================================ */
+:root{
+  --bg:#0e1116; --panel:#161b23; --panel2:#1c232d; --panel3:#212a35;
+  --line:#2a333f; --line2:#374252;
+  --tx:#e6edf3; --tx2:#a6b3c2; --tx3:#7d8b9b; --tx4:#5b6878;
+  --up:#26a69a; --dn:#ef5350; --acc:#f0b429; --acc2:#4b9fe1; --vio:#a78bfa;
+  --mono:ui-monospace,"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,"Segoe UI","PingFang TC","Microsoft JhengHei","Noto Sans TC",sans-serif;
+  --hdr:56px; --nav:224px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--tx);font-family:var(--sans);font-size:14px;
+  line-height:1.55;-webkit-font-smoothing:antialiased;overflow:hidden;
+}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
+::-webkit-scrollbar-thumb:hover{background:var(--line2)}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.up{color:var(--up)} .dn{color:var(--dn)} .acc{color:var(--acc)}
+.acc2{color:var(--acc2)} .vio{color:var(--vio)}
+.t2{color:var(--tx2)} .t3{color:var(--tx3)} .t4{color:var(--tx4)}
+.hide{display:none!important}
+
+/* ============================ HEADER ============================ */
+header{
+  height:var(--hdr);border-bottom:1px solid var(--line);background:var(--panel);
+  display:flex;align-items:center;gap:0;padding:0 14px;position:relative;z-index:40;
+}
+.brand{display:flex;align-items:center;gap:10px;width:calc(var(--nav) - 14px);flex:none}
+.brand .logo{
+  width:28px;height:28px;border-radius:7px;background:linear-gradient(140deg,var(--acc),#c98d0c);
+  display:grid;place-items:center;color:#14100a;font-weight:800;font-size:13px;font-family:var(--mono);
+  flex:none;box-shadow:0 0 0 1px rgba(240,180,41,.35),0 2px 10px rgba(240,180,41,.18)
+}
+.brand .nm{font-size:13.5px;font-weight:700;letter-spacing:.02em;line-height:1.15}
+.brand .sb{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;color:var(--tx4);text-transform:uppercase}
+
+.hdiv{width:1px;height:30px;background:var(--line);flex:none;margin:0 12px}
+
+.exwrap{display:flex;gap:8px;flex:none}
+.exchip{
+  display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:5px 10px 5px 9px;cursor:pointer;transition:.15s;user-select:none
+}
+.exchip:hover{border-color:var(--line2);background:var(--panel3)}
+.exchip.on{border-color:rgba(38,166,154,.45);background:rgba(38,166,154,.07)}
+.exchip.off{opacity:.62}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--tx4);flex:none}
+.exchip.on .dot{background:var(--up);box-shadow:0 0 0 3px rgba(38,166,154,.16);animation:pulse 2.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+.exchip .lbl{font-size:12px;font-weight:600;line-height:1.2}
+.exchip .lat{font-family:var(--mono);font-size:9.5px;color:var(--tx3);line-height:1.2}
+
+.hstats{display:flex;gap:22px;margin-left:auto;align-items:center;flex:none}
+.hstat{text-align:right;line-height:1.25}
+.hstat .k{font-family:var(--mono);font-size:9px;letter-spacing:.14em;color:var(--tx4);text-transform:uppercase}
+.hstat .v{font-family:var(--mono);font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
+
+.levbadge{
+  display:flex;align-items:center;gap:7px;background:rgba(240,180,41,.1);
+  border:1px solid rgba(240,180,41,.42);border-radius:8px;padding:5px 11px;flex:none
+}
+.levbadge .x{font-family:var(--mono);font-size:16px;font-weight:800;color:var(--acc);line-height:1}
+.levbadge .m{font-family:var(--mono);font-size:8.5px;letter-spacing:.12em;color:var(--acc);opacity:.8;text-transform:uppercase}
+
+.kill{
+  background:rgba(239,83,80,.1);border:1px solid rgba(239,83,80,.5);color:var(--dn);
+  border-radius:8px;padding:8px 15px;font-family:var(--mono);font-size:11px;font-weight:700;
+  letter-spacing:.09em;cursor:pointer;transition:.15s;flex:none;text-transform:uppercase
+}
+.kill:hover{background:var(--dn);color:#fff;box-shadow:0 0 18px rgba(239,83,80,.4)}
+.kill.armed{background:var(--dn);color:#fff;animation:blink 1s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.55}}
+
+/* ============================ LAYOUT ============================ */
+.shell{display:flex;height:calc(100vh - var(--hdr))}
+nav{
+  width:var(--nav);flex:none;border-right:1px solid var(--line);background:var(--panel);
+  display:flex;flex-direction:column;padding:12px 10px;overflow-y:auto
+}
+.navgrp{font-family:var(--mono);font-size:9px;letter-spacing:.16em;color:var(--tx4);
+  text-transform:uppercase;padding:14px 10px 7px}
+.navitem{
+  display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:8px;cursor:pointer;
+  color:var(--tx2);font-size:13px;transition:.13s;position:relative;user-select:none
+}
+.navitem:hover{background:var(--panel2);color:var(--tx)}
+.navitem.act{background:var(--panel3);color:var(--tx);font-weight:600}
+.navitem.act::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:2.5px;
+  background:var(--acc);border-radius:0 3px 3px 0}
+.navitem .ic{width:16px;text-align:center;font-size:13px;flex:none;opacity:.85}
+.navitem .bdg{margin-left:auto;font-family:var(--mono);font-size:9.5px;padding:1px 6px;border-radius:9px;
+  background:var(--panel3);color:var(--tx3)}
+.navitem .bdg.hot{background:rgba(240,180,41,.15);color:var(--acc)}
+.navitem .bdg.grn{background:rgba(38,166,154,.15);color:var(--up)}
+.navitem .bdg.red{background:rgba(239,83,80,.15);color:var(--dn)}
+
+.navfoot{margin-top:auto;padding:12px 10px 4px;border-top:1px solid var(--line)}
+.navfoot .r{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;
+  color:var(--tx4);padding:3px 0}
+.navfoot .r b{color:var(--tx3);font-weight:600}
+
+main{flex:1;overflow-y:auto;padding:18px 20px 60px;position:relative}
+
+/* ============================ PRIMITIVES ============================ */
+.pgh{display:flex;align-items:flex-end;gap:14px;margin-bottom:16px;flex-wrap:wrap}
+.pgh h1{font-size:19px;font-weight:700;letter-spacing:-.01em}
+.pgh .d{font-size:12.5px;color:var(--tx3);padding-bottom:2px}
+.pgh .sp{margin-left:auto;display:flex;gap:8px;align-items:center}
+
+.grid{display:grid;gap:12px}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.g5{grid-template-columns:repeat(5,minmax(0,1fr))}
+@media(max-width:1500px){.g5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:1240px){.g4{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .g3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:980px){.g2,.g3,.g4,.g5{grid-template-columns:1fr}}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.panel>.ph{
+  display:flex;align-items:center;gap:10px;padding:11px 15px;border-bottom:1px solid var(--line);
+  background:var(--panel2)
+}
+.panel>.ph .t{font-size:12.5px;font-weight:600;letter-spacing:.01em}
+.panel>.ph .s{font-family:var(--mono);font-size:9.5px;color:var(--tx4);letter-spacing:.1em;text-transform:uppercase}
+.panel>.ph .sp{margin-left:auto;display:flex;gap:7px;align-items:center}
+.panel>.pb{padding:15px}
+.panel>.pb.tight{padding:0}
+
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px}
+.tile .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.13em;color:var(--tx4);
+  text-transform:uppercase;display:flex;align-items:center;gap:6px}
+.tile .v{font-family:var(--mono);font-size:23px;font-weight:700;line-height:1.3;margin-top:5px;
+  font-variant-numeric:tabular-nums}
+.tile .sv{font-size:11.5px;color:var(--tx3);font-family:var(--mono)}
+
+.chip{
+  display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:9.5px;
+  font-weight:700;letter-spacing:.08em;padding:2.5px 8px;border-radius:5px;text-transform:uppercase;
+  border:1px solid transparent;white-space:nowrap
+}
+.chip.g{background:rgba(38,166,154,.13);color:var(--up);border-color:rgba(38,166,154,.3)}
+.chip.r{background:rgba(239,83,80,.13);color:var(--dn);border-color:rgba(239,83,80,.3)}
+.chip.a{background:rgba(240,180,41,.13);color:var(--acc);border-color:rgba(240,180,41,.3)}
+.chip.b{background:rgba(75,159,225,.13);color:var(--acc2);border-color:rgba(75,159,225,.3)}
+.chip.v{background:rgba(167,139,250,.13);color:var(--vio);border-color:rgba(167,139,250,.3)}
+.chip.n{background:var(--panel3);color:var(--tx3);border-color:var(--line)}
+
+.btn{
+  background:var(--panel3);border:1px solid var(--line2);color:var(--tx2);border-radius:7px;
+  padding:6px 12px;font-size:12px;font-family:var(--sans);cursor:pointer;transition:.13s;
+  display:inline-flex;align-items:center;gap:6px;white-space:nowrap
+}
+.btn:hover{background:var(--line);color:var(--tx);border-color:var(--tx4)}
+.btn:active{transform:translateY(1px)}
+.btn.sm{padding:3.5px 9px;font-size:11px;border-radius:6px}
+.btn.pri{background:rgba(240,180,41,.13);border-color:rgba(240,180,41,.45);color:var(--acc);font-weight:600}
+.btn.pri:hover{background:var(--acc);color:#14100a}
+.btn.grn{background:rgba(38,166,154,.13);border-color:rgba(38,166,154,.45);color:var(--up)}
+.btn.grn:hover{background:var(--up);color:#04140f}
+.btn.red{background:rgba(239,83,80,.13);border-color:rgba(239,83,80,.45);color:var(--dn)}
+.btn.red:hover{background:var(--dn);color:#fff}
+.btn:disabled{opacity:.35;cursor:not-allowed;transform:none}
+.btn.mono{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em}
+
+input[type=text],input[type=password],input[type=number],select{
+  background:var(--bg);border:1px solid var(--line);color:var(--tx);border-radius:7px;
+  padding:7px 10px;font-family:var(--mono);font-size:12.5px;width:100%;outline:none;transition:.13s
+}
+input:focus,select:focus{border-color:var(--acc2);box-shadow:0 0 0 2px rgba(75,159,225,.13)}
+input::placeholder{color:var(--tx4)}
+select{cursor:pointer;font-family:var(--sans);font-size:12.5px}
+label.fl{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;color:var(--tx4);
+  text-transform:uppercase;margin-bottom:5px}
+.fld{margin-bottom:11px}
+
+.sw{position:relative;width:38px;height:21px;flex:none;cursor:pointer}
+.sw input{position:absolute;opacity:0;width:0;height:0}
+.sw .tr{position:absolute;inset:0;background:var(--panel3);border:1px solid var(--line2);
+  border-radius:11px;transition:.2s}
+.sw .tr::before{content:"";position:absolute;width:15px;height:15px;left:2px;top:2px;
+  background:var(--tx3);border-radius:50%;transition:.2s}
+.sw input:checked + .tr{background:rgba(38,166,154,.28);border-color:var(--up)}
+.sw input:checked + .tr::before{transform:translateX(17px);background:var(--up)}
+.swrow{display:flex;align-items:center;gap:11px;padding:8px 0}
+.swrow .txt{flex:1;min-width:0}
+.swrow .txt .a{font-size:12.5px;color:var(--tx)}
+.swrow .txt .b{font-size:11px;color:var(--tx3);line-height:1.45}
+
+/* segmented control */
+.seg{display:inline-flex;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{
+  background:none;border:none;color:var(--tx3);padding:4.5px 12px;border-radius:6px;cursor:pointer;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;transition:.13s;text-transform:uppercase
+}
+.seg button:hover{color:var(--tx2)}
+.seg button.act{background:var(--panel3);color:var(--tx);font-weight:700}
+.seg button.act.warn{background:rgba(240,180,41,.18);color:var(--acc)}
+.seg button.act.grn{background:rgba(38,166,154,.18);color:var(--up)}
+
+/* ============================ TABLES ============================ */
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{
+  text-align:left;padding:8px 13px;background:var(--panel2);color:var(--tx4);font-weight:600;
+  font-family:var(--mono);font-size:9px;letter-spacing:.11em;text-transform:uppercase;
+  border-bottom:1px solid var(--line);white-space:nowrap;position:sticky;top:0;z-index:2
+}
+td{padding:9px 13px;border-bottom:1px solid var(--line);color:var(--tx2);white-space:nowrap;
+   vertical-align:middle}
+tbody tr:hover{background:var(--panel2)}
+tbody tr:last-child td{border-bottom:none}
+td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.empty{padding:34px 15px;text-align:center;color:var(--tx4);font-size:12.5px}
+.empty .big{font-size:26px;opacity:.28;margin-bottom:8px}
+
+/* ============================ GATE FUNNEL ============================ */
+.gaterow{
+  display:flex;align-items:center;gap:11px;padding:8px 13px;border-bottom:1px solid var(--line);
+  font-size:12px;transition:.15s
+}
+.gaterow:last-child{border-bottom:none}
+.gaterow .no{
+  font-family:var(--mono);font-size:9px;font-weight:700;padding:2.5px 7px;border-radius:4px;
+  letter-spacing:.06em;flex:none;background:var(--panel3);color:var(--tx3);min-width:50px;text-align:center
+}
+.gaterow.pass .no{background:rgba(38,166,154,.16);color:var(--up)}
+.gaterow.fail .no{background:rgba(239,83,80,.16);color:var(--dn)}
+.gaterow.wait .no{background:rgba(240,180,41,.16);color:var(--acc)}
+.gaterow.skip{opacity:.34}
+.gaterow .ttl{color:var(--tx);flex:none;width:118px;font-size:12px}
+.gaterow .det{color:var(--tx3);font-family:var(--mono);font-size:10.5px;flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis}
+.gaterow .st{margin-left:auto;flex:none}
+
+.assetcard{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.assetcard.armed{border-color:rgba(38,166,154,.45);box-shadow:0 0 0 1px rgba(38,166,154,.16)}
+.assetcard.blocked{border-color:rgba(239,83,80,.3)}
+.ach{display:flex;align-items:center;gap:10px;padding:11px 14px;background:var(--panel2);
+  border-bottom:1px solid var(--line)}
+.ach .sym{font-family:var(--mono);font-size:14px;font-weight:700;letter-spacing:.02em}
+.ach .px{font-family:var(--mono);font-size:13px;font-variant-numeric:tabular-nums;margin-left:auto}
+.ach .chg{font-family:var(--mono);font-size:10.5px;min-width:56px;text-align:right}
+
+/* price ticker cards */
+.tick{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px;
+  position:relative;overflow:hidden}
+.tick .top{display:flex;align-items:baseline;gap:8px}
+.tick .sym{font-family:var(--mono);font-size:13px;font-weight:700}
+.tick .ex{font-family:var(--mono);font-size:9px;color:var(--tx4);letter-spacing:.1em}
+.tick .price{font-family:var(--mono);font-size:25px;font-weight:700;line-height:1.3;margin-top:2px;
+  font-variant-numeric:tabular-nums;transition:color .35s}
+.tick .price.flashu{color:var(--up)} .tick .price.flashd{color:var(--dn)}
+.tick .meta{display:flex;gap:12px;margin-top:5px;font-family:var(--mono);font-size:10.5px;color:var(--tx3);flex-wrap:wrap}
+.tick .spark{margin-top:9px;height:38px;width:100%;display:block}
+
+.bar{height:5px;background:var(--panel3);border-radius:3px;overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;border-radius:3px;transition:width .4s}
+
+/* logs */
+.logline{
+  display:flex;gap:11px;padding:4.5px 14px;font-family:var(--mono);font-size:11.5px;
+  border-bottom:1px solid rgba(42,51,63,.45);line-height:1.5
+}
+.logline:hover{background:var(--panel2)}
+.logline .ts{color:var(--tx4);flex:none}
+.logline .lv{flex:none;width:46px;font-weight:700;font-size:9.5px;letter-spacing:.07em;padding-top:1px}
+.logline .ms{color:var(--tx2);flex:1;min-width:0;word-break:break-word;white-space:pre-wrap}
+.lv.INFO{color:var(--acc2)} .lv.WARN{color:var(--acc)} .lv.ERR{color:var(--dn)}
+.lv.EXEC{color:var(--vio)} .lv.GATE{color:var(--tx3)} .lv.RISK{color:var(--up)}
+
+/* callouts */
+.note{border-radius:9px;padding:11px 14px;font-size:12px;line-height:1.6;color:var(--tx2)}
+.note.warn{background:rgba(240,180,41,.07);border:1px solid rgba(240,180,41,.28)}
+.note.bad{background:rgba(239,83,80,.07);border:1px solid rgba(239,83,80,.28)}
+.note.good{background:rgba(38,166,154,.07);border:1px solid rgba(38,166,154,.28)}
+.note.info{background:rgba(75,159,225,.07);border:1px solid rgba(75,159,225,.28)}
+.note b{color:var(--tx)}
+.note .h{font-weight:700;color:var(--tx);margin-bottom:4px;display:flex;align-items:center;gap:7px}
+
+/* modal */
+.mask{position:fixed;inset:0;background:rgba(8,10,14,.78);backdrop-filter:blur(3px);z-index:100;
+  display:grid;place-items:center;padding:20px}
+.modal{background:var(--panel);border:1px solid var(--line2);border-radius:13px;max-width:480px;
+  width:100%;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.6)}
+.modal .mh{padding:15px 19px;border-bottom:1px solid var(--line);font-size:14.5px;font-weight:700;
+  display:flex;align-items:center;gap:9px}
+.modal .mb{padding:17px 19px;color:var(--tx2);font-size:13px;line-height:1.65}
+.modal .mf{padding:13px 19px;border-top:1px solid var(--line);display:flex;gap:9px;justify-content:flex-end;
+  background:var(--panel2)}
+
+/* toast */
+#toasts{position:fixed;right:16px;bottom:16px;z-index:200;display:flex;flex-direction:column;gap:8px}
+.toast{background:var(--panel);border:1px solid var(--line2);border-left-width:3px;border-radius:9px;
+  padding:10px 15px;font-size:12.5px;color:var(--tx2);max-width:360px;box-shadow:0 10px 30px rgba(0,0,0,.45);
+  animation:sl .22s ease-out}
+.toast.g{border-left-color:var(--up)} .toast.r{border-left-color:var(--dn)}
+.toast.a{border-left-color:var(--acc)} .toast.b{border-left-color:var(--acc2)}
+.toast b{color:var(--tx)}
+@keyframes sl{from{opacity:0;transform:translateX(22px)}to{opacity:1;transform:none}}
+
+/* halted banner */
+.halt{
+  background:rgba(239,83,80,.1);border:1px solid rgba(239,83,80,.42);border-radius:10px;
+  padding:11px 15px;display:flex;align-items:center;gap:12px;margin-bottom:14px
+}
+.halt .ttl{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--dn);
+  text-transform:uppercase}
+.halt .ds{font-size:12px;color:var(--tx2)}
+
+.kv{display:flex;justify-content:space-between;gap:12px;padding:5.5px 0;font-size:12.5px;
+  border-bottom:1px solid rgba(42,51,63,.5)}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--tx3)}
+.kv .v{font-family:var(--mono);color:var(--tx);font-variant-numeric:tabular-nums;text-align:right}
+
+.disc{margin-top:26px;padding:15px 17px;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel);font-size:11.5px;color:var(--tx4);line-height:1.75}
+.disc b{color:var(--tx3)}
+
+/* ==================== SIMPLIFIED SHELL ==================== */
+:root{--nav:180px}
+.wrapn{max-width:1180px;margin:0 auto}
+
+/* status banner — one plain sentence, always the first thing you read */
+.status{display:flex;align-items:center;gap:15px;padding:16px 20px;border-radius:12px;
+  border:1px solid var(--line);background:var(--panel);margin-bottom:14px;flex-wrap:wrap}
+.status .ic{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;
+  font-size:17px;flex:none}
+.status .msg{flex:1;min-width:200px}
+.status .msg .a{font-size:15.5px;font-weight:600;color:var(--tx);line-height:1.35}
+.status .msg .b{font-size:12.5px;color:var(--tx3);margin-top:3px}
+.status .act{display:flex;gap:8px;flex:none;flex-wrap:wrap}
+.status.on{border-color:rgba(38,166,154,.42);background:rgba(38,166,154,.05)}
+.status.on .ic{background:rgba(38,166,154,.15);color:var(--up)}
+.status.off .ic{background:var(--panel3);color:var(--tx3)}
+.status.bad{border-color:rgba(239,83,80,.45);background:rgba(239,83,80,.06)}
+.status.bad .ic{background:rgba(239,83,80,.15);color:var(--dn)}
+.status.warn{border-color:rgba(240,180,41,.42);background:rgba(240,180,41,.05)}
+.status.warn .ic{background:rgba(240,180,41,.15);color:var(--acc)}
+
+/* two headline numbers */
+.big{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:17px 20px}
+.big .k{font-size:12.5px;color:var(--tx3)}
+.big .v{font-family:var(--mono);font-size:32px;font-weight:700;line-height:1.25;margin-top:4px;
+  font-variant-numeric:tabular-nums}
+.big .s{font-size:12px;color:var(--tx4);font-family:var(--mono);margin-top:2px}
+
+.minirow{display:flex;gap:0;background:var(--panel);border:1px solid var(--line);
+  border-radius:12px;overflow:hidden;margin-bottom:14px;flex-wrap:wrap}
+.minirow>div{flex:1;min-width:120px;padding:12px 16px;border-right:1px solid var(--line)}
+.minirow>div:last-child{border-right:none}
+.minirow .k{font-size:11.5px;color:var(--tx4)}
+.minirow .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+
+/* one row per asset — replaces the old multi-metric cards */
+.arow{display:flex;align-items:center;gap:14px;padding:13px 17px;border-bottom:1px solid var(--line)}
+.arow:last-child{border-bottom:none}
+.arow .sym{font-family:var(--mono);font-size:14px;font-weight:700;width:46px;flex:none}
+.arow .px{font-family:var(--mono);font-size:15px;width:110px;flex:none;
+  font-variant-numeric:tabular-nums;transition:color .35s}
+.arow .chg{font-family:var(--mono);font-size:12.5px;width:74px;flex:none}
+.arow .spark{width:96px;height:26px;flex:none;margin:0}
+.arow .st{flex:1;min-width:0;font-size:12.5px;color:var(--tx3);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arow .rt{flex:none;display:flex;gap:6px;align-items:center}
+@media(max-width:820px){.arow .spark,.arow .chg{display:none}}
+
+/* progressive disclosure */
+details.more{margin-top:12px;border:1px solid var(--line);border-radius:11px;
+  background:var(--panel);overflow:hidden}
+details.more>summary{padding:12px 17px;cursor:pointer;font-size:13px;color:var(--tx2);
+  list-style:none;display:flex;align-items:center;gap:9px;user-select:none}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary::before{content:"▸";color:var(--tx4);font-size:11px;transition:.15s}
+details.more[open]>summary::before{transform:rotate(90deg)}
+details.more>summary:hover{background:var(--panel2);color:var(--tx)}
+details.more[open]>summary{border-bottom:1px solid var(--line);background:var(--panel2)}
+details.more .inner{padding:15px 17px}
+details.more .inner.tight{padding:0}
+
+/* setup page blocks */
+.block{margin-bottom:16px}
+.block>.bh{display:flex;align-items:baseline;gap:10px;margin-bottom:9px}
+.block>.bh .n{font-size:15px;font-weight:600;color:var(--tx)}
+.block>.bh .d{font-size:12px;color:var(--tx4)}
+
+.exsimple{display:flex;align-items:center;gap:13px;padding:14px 17px;
+  border-bottom:1px solid var(--line);flex-wrap:wrap}
+.exsimple:last-child{border-bottom:none}
+.exsimple .nm{font-size:13.5px;font-weight:600;width:118px;flex:none}
+.exsimple .fields{display:flex;gap:8px;flex:1;min-width:240px;flex-wrap:wrap}
+.exsimple .fields input{flex:1;min-width:110px}
+
+.rulebox{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.rulebox>div{background:var(--panel);padding:12px 15px}
+.rulebox .k{font-size:11.5px;color:var(--tx4)}
+.rulebox .v{font-family:var(--mono);font-size:14.5px;font-weight:600;color:var(--acc);margin-top:3px}
+
+.stratrow{display:flex;align-items:center;gap:14px;padding:15px 17px;
+  border-bottom:1px solid var(--line);flex-wrap:wrap}
+.stratrow:last-child{border-bottom:none}
+.stratrow .info{flex:1;min-width:220px}
+.stratrow .info .a{font-size:14px;font-weight:600;color:var(--tx);display:flex;
+  align-items:center;gap:8px;flex-wrap:wrap}
+.stratrow .info .b{font-size:12px;color:var(--tx3);margin-top:4px;line-height:1.55}
+.stratrow .pick{display:flex;gap:6px;flex:none;flex-wrap:wrap}
+
+/* ---- 即時行情 live quote cards (real exchange data) ---- */
+.lgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media(max-width:820px){.lgrid{grid-template-columns:1fr}}
+.lcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:14px 16px;position:relative;overflow:hidden}
+.lcard .top{display:flex;align-items:center;gap:8px}
+.lcard .sym{font-family:var(--mono);font-size:13.5px;font-weight:700}
+.lcard .pair{font-family:var(--mono);font-size:9.5px;color:var(--tx4);letter-spacing:.08em}
+.lcard .px{font-family:var(--mono);font-size:27px;font-weight:700;line-height:1.25;margin-top:4px;
+  font-variant-numeric:tabular-nums;transition:color .4s}
+.lcard .px.u{color:var(--up)} .lcard .px.d{color:var(--dn)}
+.lcard .sub{display:flex;gap:12px;margin-top:5px;font-family:var(--mono);font-size:11px;
+  color:var(--tx3);flex-wrap:wrap}
+.lcard .hl{display:flex;gap:9px;margin-top:8px;font-family:var(--mono);font-size:10px;color:var(--tx4)}
+.lcard .rng{height:4px;background:var(--panel3);border-radius:3px;margin-top:6px;position:relative}
+.lcard .rng i{position:absolute;top:-2px;width:2px;height:8px;background:var(--acc);border-radius:2px}
+.lcard .spark{margin-top:8px;height:32px;width:100%;display:block}
+.lcard.stale{opacity:.55}
+.livehead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.livehead .src{font-family:var(--mono);font-size:10px;color:var(--tx4)}
+</style>
+</head>
+<body>
+
+<!-- ============================ HEADER ============================ -->
+<header>
+  <div class="brand">
+    <div class="logo">Q</div>
+    <div>
+      <div class="nm">QUANT TERMINAL</div>
+      <div class="sb">Futures Bot v2.4</div>
+    </div>
+  </div>
+
+  <div class="hdiv"></div>
+
+  <div class="exwrap">
+    <div class="exchip off" id="chip-conn" data-action="nav" data-view="setup">
+      <span class="dot"></span>
+      <div><div class="lbl" id="conn-lbl">未連線</div>
+           <div class="lat" id="conn-sub">前往設定</div></div>
+    </div>
+  </div>
+
+  <div class="hstats">
+    <div class="hstat">
+      <div class="k">總資產</div>
+      <div class="v" id="h-equity">—</div>
+    </div>
+    <div class="hstat">
+      <div class="k">總盈虧</div>
+      <div class="v" id="h-pnl">—</div>
+    </div>
+    <div class="levbadge"><span class="x">20×</span></div>
+    <button class="kill" id="killbtn" data-action="kill">■ 緊急停止</button>
+  </div>
+</header>
+
+<!-- ============================ SHELL ============================ -->
+<div class="shell">
+  <nav>
+    <div class="navitem act" data-action="nav" data-view="console"><span class="ic">▤</span>主控台<span class="bdg" id="nb-ov">—</span></div>
+    <div class="navitem" data-action="nav" data-view="setup"><span class="ic">⚙</span>設定<span class="bdg" id="nb-ex">0/2</span></div>
+    <div class="navitem" data-action="nav" data-view="backtest"><span class="ic">▦</span>回測<span class="bdg" id="nb-bt">—</span></div>
+
+    <div class="navfoot">
+      <div class="r"><span>狀態</span><b id="f-engine">閒置</b></div>
+      <div class="r"><span>模式</span><b id="f-mode">測試網</b></div>
+      <div class="r"><span>執行時間</span><b id="f-up">00:00:00</b></div>
+      <div class="r"><span>資料</span><b class="acc">模擬</b></div>
+    </div>
+  </nav>
+
+  <main id="main"><div id="view"></div></main>
+</div>
+
+<div id="toasts"></div>
+<div id="modal-root"></div>
+
+<script>
+"use strict";
+/* ==================================================================
+   QUANT TERMINAL — Crypto Futures Auto-Trading Bot Dashboard
+   ------------------------------------------------------------------
+   SIMULATION ONLY. No network calls are made. All prices, fills and
+   balances come from a local stochastic market model. The exchange
+   panels are UI + validation scaffolding; wiring them to real order
+   endpoints requires a server-side signer (see notes in Exchange view).
+   ================================================================== */
+
+/* ---------------------------------------------------------------- *
+ * 1. CONFIG
+ * ---------------------------------------------------------------- */
+const CFG = {
+  leverage: 20,                 // hard locked
+  maintMarginRate: 0.004,       // 0.4% — for liquidation estimate
+  takerFee: 0.0005,             // 5 bps per side
+  riskPct: 0.01,                // GATE 5: max 1% per trade
+  minRR: 2.0,                   // GATE 5: min 1:2
+  slAtrMult: 2.0,               // GATE 5: SL >= 2x ATR
+  maxMarginUse: 0.80,           // margin utilisation < 80%
+  minConfluence: 3,             // GATE 4: >= 3 confluences
+  breakers: { daily: 0.02, weekly: 0.05, streak: 3, maxTradesDay: 2 },
+  barMs: 1500,                  // one simulated 15m bar every 1.5s
+  tickMs: 700,
+  // trendStrength: per-15m-bar drift as a fraction of per-bar vol while a regime
+  // is trending. At 4H the effective ratio is 4× this, so 0.065 gives ~0.26 —
+  // 15m stays near-random (as real intraday crypto is) while 4H trends cleanly
+  // enough to print HH/HL without pinning ADX at implausible extremes.
+  trendStrength: 0.065,
+  history: 26880,               // 15m bars kept = 280 simulated days (W1 needs depth)
+  // Base series is 15m; every other timeframe is derived from it so the
+  // timeframes can never disagree with each other.
+  assets: {                     // vol is per 15m bar
+    BTC: { px: 118420.5, vol: 0.0021, dp: 1, qstep: 0.001 },
+    ETH: { px: 4187.62,  vol: 0.0028, dp: 2, qstep: 0.01  },
+    SOL: { px: 214.870,  vol: 0.0036, dp: 3, qstep: 0.1   },
+  },
+};
+const ASSETS = Object.keys(CFG.assets);
+
+/* Timeframe registry — ratio is in 15m bars. lr is the swing-pivot lookback,
+   which must shrink as the derived series gets shorter. cap limits how many
+   derived bars we build (deep history is only needed on the slow frames). */
+const TF = {
+  m15: { label:"15m", ratio:1,   lr:3, cap:900 },   // faster frame → tighter pivots
+  h1:  { label:"1H",  ratio:4,   lr:5, cap:600 },
+  h4:  { label:"4H",  ratio:16,  lr:5, cap:520 },
+  d1:  { label:"D1",  ratio:96,  lr:3, cap:300 },
+  w1:  { label:"W1",  ratio:672, lr:2, cap:60  },
+};
+const PLAYBOOK_TF = "h4";              // 交易操作手冊 execution timeframe
+const DUALMA_TFS  = ["m15","h4"];      // 雙均線系統 runs on both
+
+// Volume calibration: live bars accumulate per tick, seeded bars are drawn in
+// one shot — derive the seed mean from the tick model so the two match.
+const TPB = CFG.barMs / CFG.tickMs;
+const VOL_BASE = 25, VOL_MULT = 530;
+const VOL_MEAN = TPB*VOL_BASE + Math.sqrt(TPB)*0.798*VOL_MULT;
+const EXCHANGES = ["binance", "bitget"];
+const EXNAME = { binance: "Binance Futures", bitget: "Bitget Futures" };
+
+/* ---------------------------------------------------------------- *
+ * 2. STATE
+ * ---------------------------------------------------------------- */
+const S = {
+  view: "console",
+  paused: false,                // true while a backtest owns the world
+  btMode: false,                // true while running inside the backtest engine
+  booted: Date.now(),
+  engine: "IDLE",              // IDLE | RUNNING | HALTED | KILLED
+  killed: false,
+  testnet: true,
+
+  ex: {
+    binance: { on:false, key:"", secret:"", pass:"", lat:null, tier:null, testing:false },
+    bitget:  { on:false, key:"", secret:"", pass:"", lat:null, tier:null, testing:false },
+  },
+
+  acct: {
+    start: 10000,
+    equity: 10000,
+    realized: 0,
+    fees: 0,
+    dayAnchor: 10000,
+    weekAnchor: 10000,
+    peak: 10000,
+  },
+
+  strat: {
+    playbook: { on:true,  alloc:{BTC:true, ETH:true, SOL:true} },   // 4H only
+    dualma:   { on:false, alloc:{BTC:true, ETH:true, SOL:true},
+                tf:{ m15:true, h4:true },
+                fast:5, slow:20, adxMin:22, volMult:1.2, useTrendFilter:true },
+  },
+
+  positions: [],
+  closed: [],
+  orders: [],            // pending limit orders
+  logs: [],
+  signals: [],           // recent evaluations for the feed
+  equityCurve: [],
+
+  breaker: { daily:false, weekly:false, streak:false, cooldownUntil:0, streakCount:0, tradesToday:0 },
+
+  mkt: {},               // per-asset market model
+  seq: 1,
+  lastBar: 0,
+  logFilter: "",
+};
+
+/* ---------------------------------------------------------------- *
+ * 3. HELPERS
+ * ---------------------------------------------------------------- */
+const $  = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const uid = () => (S.seq++).toString(36).padStart(4,"0").toUpperCase();
+
+function fmt(n, dp=2){
+  if (n === null || n === undefined || !isFinite(n)) return "—";
+  return Number(n).toLocaleString("en-US",{minimumFractionDigits:dp, maximumFractionDigits:dp});
+}
+function usd(n, dp=2){ return (n<0?"-$":"$") + fmt(Math.abs(n), dp); }
+function sgn(n, dp=2, pre="$"){
+  const s = n>=0 ? "+" : "-";
+  return s + pre + fmt(Math.abs(n), dp);
+}
+function pct(n, dp=2){ return (n>=0?"+":"") + fmt(n*100, dp) + "%"; }
+function cls(n){ return n>0 ? "up" : n<0 ? "dn" : "t3"; }
+function hhmmss(ms){
+  const s = Math.floor(ms/1000);
+  return [Math.floor(s/3600), Math.floor(s/60)%60, s%60]
+    .map(v=>String(v).padStart(2,"0")).join(":");
+}
+function clock(t=Date.now()){
+  const d = new Date(t);
+  return [d.getHours(),d.getMinutes(),d.getSeconds()].map(v=>String(v).padStart(2,"0")).join(":");
+}
+function esc(s){
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function roundStep(v, step){ return Math.round(v/step)*step; }
+
+function log(level, msg){
+  S.logs.unshift({ t:Date.now(), level, msg });
+  if (S.logs.length > 500) S.logs.length = 500;
+}
+function toast(msg, kind="b", ms=4200){
+  if (S.btMode) return;              // a backtest would emit thousands of these
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.innerHTML = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(()=>{ el.style.opacity="0"; el.style.transition="opacity .3s";
+                   setTimeout(()=>el.remove(),300); }, ms);
+}
+
+/* ---------------------------------------------------------------- *
+ * 4. MARKET MODEL  — synthetic 1H candles with trending regimes
+ * ---------------------------------------------------------------- */
+function gauss(){
+  let u=0,v=0;
+  while(u===0) u=Math.random();
+  while(v===0) v=Math.random();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+}
+
+/** Pick the next regime's per-bar drift: trend up / trend down / range */
+function nextDrift(vol){
+  const r = Math.random(), d = vol * CFG.trendStrength * (0.75 + Math.random()*0.6);
+  return r < 0.40 ? d : r < 0.80 ? -d : 0;
+}
+
+/** Regime length in 15m bars. ~1200–3000 bars = 75–187 bars at 4H, so the
+ *  playbook's execution timeframe sees trends that run for tens of bars. */
+const nextRegime = () => 1200 + Math.floor(Math.random()*1800);
+
+function seedMarket(){
+  ASSETS.forEach(a => {
+    const c = CFG.assets[a];
+    const bars = [];
+    let px = c.px * (0.86 + Math.random()*0.06);
+    let drift = nextDrift(c.vol);
+    let regime = nextRegime();
+    // Volume clustering. Without persistence, per-bar volume is independent and
+    // aggregating 16 bars into a 4H candle averages the dispersion to nothing —
+    // a relative-volume filter then never triggers on higher timeframes.
+    let act = 1;
+
+    for (let i=0;i<CFG.history;i++){
+      if (--regime <= 0){
+        drift = nextDrift(c.vol);
+        // soft band-keeping so 280 days of compounding cannot wander orders of
+        // magnitude away from a plausible price
+        if (px > c.px*2.2) drift = -Math.abs(drift);
+        else if (px < c.px*0.45) drift = Math.abs(drift);
+        regime = nextRegime();
+      }
+      const o = px;
+      const shock = gauss()*c.vol;
+      px = px * (1 + drift + shock);
+      const hi = Math.max(o,px) * (1 + Math.abs(gauss())*c.vol*0.42);
+      const lo = Math.min(o,px) * (1 - Math.abs(gauss())*c.vol*0.42);
+      // Volume tracks realized movement — a flat bar is a quiet bar. Mean is
+      // matched to the live per-tick accumulator in tickPrices().
+      act = clamp(act + (1-act)*0.01 + gauss()*0.05*act, 0.3, 3.2);
+      const vol = VOL_MEAN * (0.45 + Math.abs(shock)/c.vol*0.69) * act;
+      bars.push({ o, h:hi, l:lo, c:px, v:vol });
+    }
+    // normalise the last close toward the configured spot
+    const k = c.px / px;
+    bars.forEach(b => { b.o*=k; b.h*=k; b.l*=k; b.c*=k; });
+
+    S.mkt[a] = {
+      bars,
+      last: bars[bars.length-1].c,
+      prev: bars[bars.length-1].c,
+      dayOpen: bars[bars.length-96] ? bars[bars.length-96].c : bars[0].c,
+      drift, regime,
+      ind: null, tf: {}, act,
+      barIdx: bars.length - 1,      // absolute index of the newest base bar
+
+      cross: { m15:null, h4:null },
+      seen:  { m15:{bar:-1, above:null}, h4:{bar:-1, above:null} },
+    };
+  });
+}
+
+function tickPrices(){
+  ASSETS.forEach(a => {
+    const m = S.mkt[a], c = CFG.assets[a];
+    if (--m.regime <= 0){
+      m.drift = nextDrift(c.vol);
+      m.regime = 40 + Math.floor(Math.random()*70);
+    }
+    m.prev = m.last;
+    const step = c.vol / Math.sqrt(CFG.barMs/CFG.tickMs);
+    m.last = m.last * (1 + m.drift/(CFG.barMs/CFG.tickMs) + gauss()*step);
+    const ret = (m.last - m.prev) / m.prev;
+
+    const b = m.bars[m.bars.length-1];
+    b.c = m.last;
+    // Only ~2 ticks land per bar, so tracking the tick path alone produces
+    // wickless bars: |h-l| would always equal |o-c|. That silently breaks pin-bar
+    // detection (which needs a wick ≥40% of range) and distorts swing pivots.
+    // Extend the range to represent movement between ticks.
+    const w = Math.abs(gauss()) * step * 0.55;
+    b.h = Math.max(b.h, m.last*(1+w));
+    b.l = Math.min(b.l, m.last*(1-w));
+    m.act = clamp(m.act + (1-m.act)*0.01 + gauss()*0.05*m.act, 0.3, 3.2);
+    b.v += (25 + (Math.abs(ret)/c.vol) * 530) * m.act;   // calibrated to seedMarket()
+  });
+}
+
+function rollBar(){
+  ASSETS.forEach(a => {
+    const m = S.mkt[a];
+    m.bars.push({ o:m.last, h:m.last, l:m.last, c:m.last, v:0 });
+    if (m.bars.length > CFG.history) m.bars.shift();
+    m.barIdx++;
+    m.dayOpen = m.bars[Math.max(0, m.bars.length-96)].c;   // 96 × 15m = 24h
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * 5. INDICATORS
+ * ---------------------------------------------------------------- */
+function ema(vals, p){
+  const k = 2/(p+1), out = [];
+  let e = vals[0];
+  for (let i=0;i<vals.length;i++){ e = i ? vals[i]*k + e*(1-k) : vals[i]; out.push(e); }
+  return out;
+}
+function atr(bars, p=14){
+  const tr = [];
+  for (let i=0;i<bars.length;i++){
+    const b = bars[i], pv = i ? bars[i-1].c : b.o;
+    tr.push(Math.max(b.h-b.l, Math.abs(b.h-pv), Math.abs(b.l-pv)));
+  }
+  // Wilder smoothing
+  let a = tr.slice(0,p).reduce((x,y)=>x+y,0)/p;
+  for (let i=p;i<tr.length;i++) a = (a*(p-1)+tr[i])/p;
+  return a;
+}
+/** Wilder ADX. Seeds the smoothers with a proper p-bar sum and uses a long
+ *  warmup — seeding from a single bar (as a short window forces) leaves the
+ *  reading stuck near its initial DX and pins ADX far too high. */
+function adx(bars, p=14){
+  // Shorten the period rather than returning 0 on short series — W1 only ever
+  // holds ~40 bars, and a hard 0 would make every weekly read "RANGING".
+  if (bars.length < 18) return 0;
+  p = Math.min(p, Math.floor(bars.length/3));
+  const src = bars.slice(-Math.min(bars.length, p*10));
+  const TRa=[], PDMa=[], NDMa=[];
+  for (let i=1;i<src.length;i++){
+    const h=src[i].h, l=src[i].l, ph=src[i-1].h, pl=src[i-1].l, pc=src[i-1].c;
+    const up=h-ph, dn=pl-l;
+    PDMa.push((up>dn && up>0) ? up : 0);
+    NDMa.push((dn>up && dn>0) ? dn : 0);
+    TRa.push(Math.max(h-l, Math.abs(h-pc), Math.abs(l-pc)));
+  }
+  if (TRa.length < p*2) return 0;
+  const sum = (arr,n) => arr.slice(0,n).reduce((a,b)=>a+b,0);
+  let tr=sum(TRa,p), pdm=sum(PDMa,p), ndm=sum(NDMa,p);
+  const dxs=[];
+  const dxOf = () => {
+    if (tr <= 0) return 0;
+    const pdi = 100*pdm/tr, ndi = 100*ndm/tr;
+    return (pdi+ndi) ? 100*Math.abs(pdi-ndi)/(pdi+ndi) : 0;
+  };
+  dxs.push(dxOf());
+  for (let i=p;i<TRa.length;i++){
+    tr  = tr  - tr/p  + TRa[i];
+    pdm = pdm - pdm/p + PDMa[i];
+    ndm = ndm - ndm/p + NDMa[i];
+    dxs.push(dxOf());
+  }
+  if (dxs.length < p) return dxs[dxs.length-1] || 0;
+  let a = sum(dxs,p)/p;
+  for (let i=p;i<dxs.length;i++) a = (a*(p-1)+dxs[i])/p;
+  return a;
+}
+
+/** Swing pivots — 5 bars either side, per 交易操作手冊 GATE 1 */
+function swings(bars, lr=5){
+  const out = [];
+  for (let i=lr;i<bars.length-lr;i++){
+    let isH=true, isL=true;
+    for (let j=i-lr;j<=i+lr;j++){
+      if (j===i) continue;
+      if (bars[j].h >= bars[i].h) isH=false;
+      if (bars[j].l <= bars[i].l) isL=false;
+    }
+    if (isH) out.push({ i, p:bars[i].h, type:"H" });
+    else if (isL) out.push({ i, p:bars[i].l, type:"L" });
+  }
+  // enforce alternation, keep the most extreme of consecutive same-type pivots
+  const alt = [];
+  out.forEach(s => {
+    const last = alt[alt.length-1];
+    if (!last || last.type !== s.type) alt.push(s);
+    else if ((s.type==="H" && s.p>last.p) || (s.type==="L" && s.p<last.p)) alt[alt.length-1]=s;
+  });
+  return alt;
+}
+
+/** Label the pivot sequence HH/HL/LH/LL and derive structure.
+ *  `lr` must scale with series length — 5 bars either side on a 30-bar daily
+ *  series detects almost nothing, so higher timeframes use a tighter window. */
+function structure(bars, lr=5){
+  const sw = swings(bars, lr);
+  const lab = [];
+  for (let i=2;i<sw.length;i++){
+    const cur = sw[i], prevSame = sw[i-2];
+    if (cur.type==="H") lab.push({ ...cur, tag: cur.p > prevSame.p ? "HH" : "LH" });
+    else                lab.push({ ...cur, tag: cur.p < prevSame.p ? "LL" : "HL" });
+  }
+  const tail = lab.slice(-6);
+  const bull = tail.filter(l => l.tag==="HH"||l.tag==="HL");
+  const bear = tail.filter(l => l.tag==="LH"||l.tag==="LL");
+  let dir = "NONE", run = 0;
+
+  // count trailing consecutive same-direction labels
+  const isBull = t => t==="HH"||t==="HL";
+  const isBear = t => t==="LH"||t==="LL";
+  if (tail.length){
+    const lastTag = tail[tail.length-1].tag;
+    const test = isBull(lastTag) ? isBull : isBear;
+    for (let i=tail.length-1;i>=0;i--){ if (test(tail[i].tag)) run++; else break; }
+    if (run >= 3) dir = isBull(lastTag) ? "UP" : "DOWN";
+  }
+  return { sw, lab, dir, run, bullN:bull.length, bearN:bear.length,
+           lastH: [...lab].reverse().find(l=>l.type==="H"),
+           lastL: [...lab].reverse().find(l=>l.type==="L") };
+}
+
+/** Resample the 15m base series onto a FIXED higher-timeframe grid.
+ *  Candle boundaries are anchored to absolute multiples of `n` (absEnd is the
+ *  absolute index of the newest base bar), so a 4H candle always covers the same
+ *  16 base bars a real chart would. Anchoring to the newest bar instead makes
+ *  the whole grid re-phase every 15m and jitters structure labels; anchoring to
+ *  array index 0 re-phases whenever the rolling buffer shifts.
+ *  The trailing group is the still-forming candle, exactly as on a live chart. */
+function resampleGrid(bars, n, absEnd, cap){
+  if (n === 1) return cap && bars.length>cap ? bars.slice(-cap) : bars;
+  const total = bars.length;
+  if (!total) return [];
+  const absStart = absEnd - total + 1;
+  const skip = ((n - (absStart % n)) % n);       // offset to the first boundary
+  const out = [];
+  for (let i=skip; i<total; i+=n){
+    const end = Math.min(i+n, total);
+    let h=-Infinity, l=Infinity, v=0;
+    for (let j=i;j<end;j++){
+      const b = bars[j];
+      if (b.h>h) h=b.h;
+      if (b.l<l) l=b.l;
+      v += b.v;
+    }
+    out.push({ o:bars[i].o, c:bars[end-1].c, h, l, v });
+  }
+  return cap && out.length>cap ? out.slice(-cap) : out;
+}
+
+/** The five market stages (震盪 / 突破 / 趨勢 / 反轉 / 無結構).
+ *  GATE 3 asks the daily for a *regime call*, not an HH/HL count — a 50-bar
+ *  daily series rarely carries three clean pivot labels, so classify it from
+ *  structure + EMA slope + ADX together. */
+function regimeStage(bars, st){
+  if (bars.length < 12) return { stage:"NO STRUCTURE", dir:"NONE" };
+  const cl = bars.map(b=>b.c);
+  const p  = Math.min(20, Math.max(5, Math.floor(bars.length/3)));
+  const e  = ema(cl, p), n = e.length;
+  const back = Math.min(6, n-1);
+  const slope = (e[n-1]-e[n-1-back]) / e[n-1-back];
+  const a = adx(bars, 14);
+  const mag = Math.abs(slope);
+  const sDir = slope > 0 ? "UP" : "DOWN";
+
+  // structure and momentum disagree → the market is turning
+  if (st.dir !== "NONE" && st.dir !== sDir && mag > 0.012)
+    return { stage:"REVERSING", dir:"NONE" };
+  if (st.dir !== "NONE" && a >= 20)
+    return { stage: st.dir==="UP" ? "TREND UP" : "TREND DOWN", dir: st.dir };
+  if (mag > 0.020 && a >= 22)
+    return { stage: sDir==="UP" ? "BREAKOUT UP" : "BREAKOUT DOWN", dir: sDir };
+  if (a < 18 || mag < 0.008)
+    return { stage:"RANGING", dir:"NONE" };
+  return { stage: sDir==="UP" ? "TREND UP" : "TREND DOWN", dir: sDir };
+}
+
+/** Nearest 4H/D1 structural level *in the direction of the trade*.
+ *  Taking the closest swing level without checking its side lets a short book a
+ *  "target" above its entry, which fills instantly at a loss. Returns null when
+ *  the direction has no defined structural target — GATE 3 then rejects. */
+function nextKeyLevel(m, dir, px){
+  const lv = [];
+  [m.tf.d1, m.tf.w1].forEach(t => t && t.st && t.st.lab.forEach(l => lv.push(l.p)));
+  const ahead = dir === "UP" ? lv.filter(v => v > px*1.0008)
+                             : lv.filter(v => v < px*0.9992);
+  if (!ahead.length) return null;
+  return dir === "UP" ? Math.min(...ahead) : Math.max(...ahead);
+}
+
+/** Impulse-leg count → GATE 2 trend maturity */
+function maturity(st){
+  const legs = st.lab.length;
+  let n = 0;
+  const isBull = t => t==="HH"||t==="HL";
+  const want = st.dir === "UP" ? isBull : (t=>t==="LH"||t==="LL");
+  for (let i=st.lab.length-1;i>=0;i--){ if (want(st.lab[i].tag)) n++; else break; }
+  const impulses = Math.ceil(n/2);
+  return impulses <= 2 ? { stage:"EARLY", impulses } :
+         impulses <= 5 ? { stage:"MID",   impulses } :
+                         { stage:"MATURE",impulses };
+}
+
+/** Confirmation candle — pinbar / engulfing (GATE 6) */
+function confirmCandle(bars, dir){
+  const b = bars[bars.length-2] || bars[bars.length-1];   // last CLOSED bar
+  const p = bars[bars.length-3] || b;
+  const range = b.h - b.l;
+  if (range <= 0) return null;
+  const body = Math.abs(b.c-b.o);
+  const upW = b.h - Math.max(b.c,b.o);
+  const dnW = Math.min(b.c,b.o) - b.l;
+
+  if (dir === "UP"){
+    if (dnW/range >= 0.40 && b.c > b.o)        return { kind:"PIN BAR", wick:dnW/range };
+    if (b.c > p.o && b.o < p.c && p.c < p.o)   return { kind:"ENGULFING", wick:dnW/range };
+  } else {
+    if (upW/range >= 0.40 && b.c < b.o)        return { kind:"PIN BAR", wick:upW/range };
+    if (b.c < p.o && b.o > p.c && p.c > p.o)   return { kind:"ENGULFING", wick:upW/range };
+  }
+  return null;
+}
+
+/** Full indicator set for one timeframe's bar series. */
+function analyze(bars, lr){
+  const cl = bars.map(b=>b.c);
+  const last = arr => arr[arr.length-1];
+  const e25 = ema(cl,25), e50 = ema(cl,50);
+  const F = S.strat.dualma.fast, L = S.strat.dualma.slow;
+  const ef = ema(cl,F), el = ema(cl,L);
+  const st = structure(bars, lr);
+  const n = bars.length;
+  return {
+    bars,
+    e25:last(e25), e50:last(e50),
+    fast:last(ef), slow:last(el),
+    atr: atr(bars,14),
+    adx: adx(bars,14),
+    st, mat: maturity(st),
+    stage: regimeStage(bars, st),
+    // Compare the last *completed* bar against the 20 before it. The forming
+    // bar is only partially accumulated, so measuring it against full bars
+    // would bias every reading low.
+    vol: n>1 ? bars[n-2].v : 0,
+    volAvg: n>22 ? bars.slice(-22,-2).reduce((s,b)=>s+b.v,0)/20 : 1,
+  };
+}
+
+const CROSS_WINDOW = 2;   // bars a fresh cross stays actionable
+
+function computeIndicators(){
+  ASSETS.forEach(a => {
+    const m = S.mkt[a];
+    m.tf = {};
+    for (const k in TF){
+      const t = TF[k];
+      m.tf[k] = analyze(resampleGrid(m.bars, t.ratio, m.barIdx, t.cap), t.lr);
+      m.tf[k].key = k;
+      m.tf[k].label = t.label;
+      m.tf[k].barIdx = Math.floor(m.barIdx / t.ratio);
+    }
+    // legacy alias so anything still reading m.ind gets the execution timeframe
+    m.ind = m.tf[PLAYBOOK_TF];
+
+    // Cross detection is a *bar-close* event, tracked independently per
+    // timeframe. Evaluating it per tick means the volume/ADX/structure filters
+    // would all have to coincide on the exact crossing tick, which effectively
+    // never happens — so latch the cross and let it stay actionable briefly.
+    DUALMA_TFS.forEach(k => {
+      const I = m.tf[k], seen = m.seen[k];
+      if (seen.bar !== I.barIdx){
+        seen.bar = I.barIdx;
+        const above = I.fast > I.slow;
+        if (seen.above !== null && above !== seen.above)
+          m.cross[k] = { dir: above ? "UP" : "DOWN", at: I.barIdx };
+        seen.above = above;
+      }
+    });
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * 6. STRATEGY 1 — 7-GATE TREND PLAYBOOK
+ * ---------------------------------------------------------------- */
+const GATE_TITLES = [
+  "Structure","Maturity","MTF Align","HPCZ Entry","Risk Calc","Confirmation","Execution"
+];
+
+/* Execution timeframe is 4H; the manual's three-layer split shifts up with it,
+   so direction now comes from W1 and room-to-target from D1. */
+function evalPlaybook(asset){
+  const m = S.mkt[asset], I = m.tf[PLAYBOOK_TF], px = m.last;
+  const HTF = m.tf.d1, TOP = m.tf.w1;
+  const g = [];
+  const push = (n,state,det) => g.push({ n, title:GATE_TITLES[n-1], state, det });
+  const skipRest = from => { for (let k=from;k<=7;k++) push(k,"skip","—"); };
+
+  /* GATE 1 — 4H structure filter: >= 3 same-direction labels */
+  const st = I.st;
+  if (st.dir === "NONE"){
+    push(1,"fail",`no clean structure · run=${st.run}/3`);
+    skipRest(2);
+    return { gates:g, ok:false, stop:1 };
+  }
+  const tags = st.lab.slice(-4).map(l=>l.tag).join(" ");
+  push(1,"pass",`${st.dir} · ${st.run} labels · ${tags}`);
+  const dir = st.dir;
+  const side = dir === "UP" ? "LONG" : "SHORT";
+
+  /* GATE 2 — trend maturity */
+  const mat = I.mat;
+  const dev = Math.abs(px - I.e50) / I.atr;
+  if (mat.stage === "MATURE"){
+    push(2,"fail",`${mat.stage} · ${mat.impulses} impulse legs → skip`);
+    skipRest(3); return { gates:g, ok:false, stop:2, dir, side };
+  }
+  if (dev > 6){
+    push(2,"fail",`extended · ${dev.toFixed(1)}× ATR from 50 EMA`);
+    skipRest(3); return { gates:g, ok:false, stop:2, dir, side };
+  }
+  push(2,"pass",`${mat.stage} · ${mat.impulses} legs · dev ${dev.toFixed(1)}×ATR`);
+
+  /* GATE 3 — D1 + W1 alignment + room to the next key level */
+  const d1d = HTF.st.dir !== "NONE" ? HTF.st.dir : HTF.stage.dir;
+  const W = TOP.stage;
+  if (d1d !== dir){
+    push(3,"fail",`D1=${d1d} ≠ 4H=${dir} · never trade against HTF`);
+    skipRest(4); return { gates:g, ok:false, stop:3, dir, side };
+  }
+  // Per the manual, the top frame only has to be *clearly identifiable* — 日線階段
+  // 能明確判定,不是無結構或反轉中. It is the immediately higher frame (here D1)
+  // that must share direction. Demanding directional agreement from the top frame
+  // too is stricter than the source and cuts valid setups roughly in half.
+  if (W.stage === "RANGING" || W.stage === "REVERSING" || W.stage === "NO STRUCTURE"){
+    push(3,"fail",`weekly = ${W.stage} → not tradeable`);
+    skipRest(4); return { gates:g, ok:false, stop:3, dir, side };
+  }
+  const keyLvl = nextKeyLevel(m, dir, px);
+  if (keyLvl === null){
+    push(3,"fail",`no HTF structural target ${dir==="UP"?"above":"below"} price`);
+    skipRest(4); return { gates:g, ok:false, stop:3, dir, side };
+  }
+  const room = Math.abs(keyLvl - px) / I.atr;
+  if (room < 2.2){
+    push(3,"fail",`only ${room.toFixed(1)}×ATR to HTF level — no room for 1:2`);
+    skipRest(4); return { gates:g, ok:false, stop:3, dir, side };
+  }
+  push(3,"pass",`D1 ${d1d} · W1 ${W.stage} · room ${room.toFixed(1)}×ATR`);
+
+  /* GATE 4 — HPCZ: >= 3 confluences, one must be 25/50 EMA */
+  const respects = Math.abs(px-I.e25) < Math.abs(px-I.e50) ? 25 : 50;
+  const emaLvl = respects===25 ? I.e25 : I.e50;
+  const conf = [];
+  if (Math.abs(px-emaLvl)/I.atr < 1.1) conf.push(`${respects} EMA`);
+  const structLvl = dir==="UP" ? st.lastL : st.lastH;
+  if (structLvl && Math.abs(px-structLvl.p)/I.atr < 1.6) conf.push(dir==="UP"?"HL structure":"LH structure");
+  // horizontal S/R: level touched >= 2x historically
+  const touches = I.bars.slice(-120).filter(b => Math.abs(b.l-px)/I.atr<0.5 || Math.abs(b.h-px)/I.atr<0.5).length;
+  if (touches >= 2) conf.push(`S/R ×${touches}`);
+  // fib retracement of the last leg
+  if (st.lastH && st.lastL){
+    const hi = Math.max(st.lastH.p, st.lastL.p), lo = Math.min(st.lastH.p, st.lastL.p);
+    [0.382,0.5,0.618].forEach(f => {
+      const lvl = dir==="UP" ? hi-(hi-lo)*f : lo+(hi-lo)*f;
+      if (Math.abs(px-lvl)/I.atr < 0.55 && !conf.some(c=>c.startsWith("Fib"))) conf.push(`Fib ${(f*100).toFixed(1)}%`);
+    });
+  }
+  // pullback (not mid-impulse)
+  const pulling = dir==="UP" ? px < I.e25*1.004 : px > I.e25*0.996;
+  if (pulling) conf.push("in pullback");
+
+  const hasEma = conf.some(c=>c.includes("EMA"));
+  if (conf.length < CFG.minConfluence || !hasEma || !pulling){
+    push(4,"wait",`${conf.length}/${CFG.minConfluence} confluence${conf.length?" · "+conf.join(", "):""}`);
+    skipRest(5); return { gates:g, ok:false, stop:4, dir, side };
+  }
+  push(4,"pass",`${conf.length} confluences · ${conf.join(", ")}`);
+
+  /* GATE 5 — risk: SL >= 2xATR, RR >= 1:2, risk <= 1% */
+  const entry = px;
+  const anchor = dir==="UP" ? (structLvl ? structLvl.p : px-2*I.atr)
+                            : (structLvl ? structLvl.p : px+2*I.atr);
+  let sl = dir==="UP" ? anchor - 0.2*I.atr : anchor + 0.2*I.atr;
+  let slDist = Math.abs(entry-sl);
+  if (slDist < CFG.slAtrMult*I.atr){
+    // per SOP: never shrink the stop to manufacture RR — widen to 2xATR and re-test RR
+    slDist = CFG.slAtrMult*I.atr;
+    sl = dir==="UP" ? entry-slDist : entry+slDist;
+  }
+  const tp = keyLvl;
+  const reward = Math.abs(tp-entry);
+  const rr = reward/slDist;
+  if (rr < CFG.minRR){
+    push(5,"fail",`RR 1:${rr.toFixed(2)} < 1:${CFG.minRR} → skip (never shrink SL)`);
+    skipRest(6); return { gates:g, ok:false, stop:5, dir, side };
+  }
+  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  if (!sizing.ok){
+    push(5,"fail",sizing.why);
+    skipRest(6); return { gates:g, ok:false, stop:5, dir, side };
+  }
+  push(5,"pass",`RR 1:${rr.toFixed(2)} · SL ${(slDist/I.atr).toFixed(2)}×ATR · ${sizing.qty.toFixed(4)} ${asset}`);
+
+  /* GATE 6 — confirmation candle on the last CLOSED 4H bar */
+  const cc = confirmCandle(I.bars, dir);
+  if (!cc){
+    push(6,"wait","awaiting rejection candle (pin / engulfing)");
+    push(7,"skip","—");
+    return { gates:g, ok:false, stop:6, dir, side, plan:{entry,sl,tp,rr,slDist,...sizing} };
+  }
+  push(6,"pass",`${cc.kind} · wick ${(cc.wick*100).toFixed(0)}% of range`);
+
+  /* GATE 7 — execution */
+  push(7,"pass","all 18 preconditions true → armed");
+  return { gates:g, ok:true, stop:7, dir, side, conf, tf:TF[PLAYBOOK_TF].label,
+           plan:{ entry, sl, tp, rr, slDist, ...sizing }, trigger:cc.kind };
+}
+
+/* ---------------------------------------------------------------- *
+ * 7. STRATEGY 2 — 雙均線交易系統 (Dual Moving Average)
+ * ---------------------------------------------------------------- */
+function evalDualMA(asset, tfKey){
+  const m = S.mkt[asset], I = m.tf[tfKey], px = m.last, C = S.strat.dualma;
+  const label = TF[tfKey].label;
+  const checks = [];
+  const xr = m.cross[tfKey];
+  const age = xr ? I.barIdx - xr.at : Infinity;
+  const fresh = !!xr && age <= CROSS_WINDOW;
+  const dir = fresh ? xr.dir : (I.fast > I.slow ? "UP" : "DOWN");
+  const side = dir === "UP" ? "LONG" : "SHORT";
+  const goldenCross = fresh && xr.dir === "UP";
+  const deathCross  = fresh && xr.dir === "DOWN";
+  const crossed = fresh;
+
+  checks.push({ k:`EMA${C.fast}/EMA${C.slow}`, ok:crossed,
+    v: goldenCross ? `GOLDEN CROSS 金叉 (${age}b)` : deathCross ? `DEATH CROSS 死叉 (${age}b)`
+       : `no fresh cross · spread ${(((I.fast-I.slow)/I.slow)*100).toFixed(2)}%` });
+
+  const volOk = I.vol >= I.volAvg * C.volMult;
+  checks.push({ k:"Volume filter", ok:volOk,
+    v:`${(I.vol/I.volAvg).toFixed(2)}× avg (need ≥${C.volMult.toFixed(1)}×)` });
+
+  const adxOk = I.adx >= C.adxMin;
+  checks.push({ k:"ADX(14)", ok:adxOk, v:`${I.adx.toFixed(1)} (need ≥${C.adxMin})` });
+
+  // Trend agreement on the signal's own timeframe. Swing structure is the
+  // primary read; when 15m is too noisy to print a clean HH/HL run, fall back to
+  // the regime call so the filter still answers "is this frame trending my way"
+  // rather than rejecting everything outright.
+  const trendDir = I.st.dir !== "NONE" ? I.st.dir : I.stage.dir;
+  const trendSrc = I.st.dir !== "NONE" ? "structure" : "regime";
+  const structOk = !C.useTrendFilter || trendDir === dir;
+  checks.push({ k:"Structure filter", ok:structOk,
+    v: C.useTrendFilter ? `${label} ${trendDir} (${trendSrc}) vs ${dir}` : "disabled" });
+
+  const ok = crossed && volOk && adxOk && structOk;
+  if (!ok) return { checks, ok:false, side, dir, tf:label, tfKey };
+
+  // Stop and target are sized off *this* timeframe's ATR — a 15m signal must
+  // not inherit a 4H stop, or its risk would be several multiples of 1%.
+  const entry = px;
+  const slDist = CFG.slAtrMult * I.atr;
+  const sl = dir==="UP" ? entry-slDist : entry+slDist;
+  const tp = dir==="UP" ? entry + slDist*CFG.minRR : entry - slDist*CFG.minRR;
+  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  if (!sizing.ok) { checks.push({k:"Sizing", ok:false, v:sizing.why});
+                    return { checks, ok:false, side, dir, tf:label, tfKey }; }
+  checks.push({ k:"Sizing", ok:true, v:`${sizing.qty.toFixed(4)} ${asset} · margin ${usd(sizing.margin)}` });
+
+  return { checks, ok:true, side, dir, tf:label, tfKey,
+           plan:{ entry, sl, tp, rr:CFG.minRR, slDist, ...sizing },
+           trigger: `${goldenCross ? "GOLDEN CROSS" : "DEATH CROSS"} ${label}` };
+}
+
+/* ---------------------------------------------------------------- *
+ * 8. POSITION SIZING  (GATE 5 / Risk Control Center)
+ * ---------------------------------------------------------------- */
+function sizePosition(equity, slDist, entry, asset){
+  const riskAmt = equity * CFG.riskPct;
+  let qty = riskAmt / slDist;
+  const step = CFG.assets[asset].qstep;
+  qty = Math.max(step, roundStep(qty, step));
+  const notional = qty * entry;
+  const margin = notional / CFG.leverage;
+  const usedMargin = S.positions.reduce((s,p)=>s+p.margin,0);
+  const util = (usedMargin + margin) / equity;
+  if (util > CFG.maxMarginUse)
+    return { ok:false, why:`margin util ${(util*100).toFixed(0)}% > ${CFG.maxMarginUse*100}%`, qty, notional, margin, riskAmt, util };
+  if (margin > equity)
+    return { ok:false, why:"insufficient margin", qty, notional, margin, riskAmt, util };
+  return { ok:true, qty, notional, margin, riskAmt, util, fee: notional*CFG.takerFee };
+}
+
+function liqPrice(entry, side){
+  const k = 1/CFG.leverage - CFG.maintMarginRate;
+  return side === "LONG" ? entry*(1-k) : entry*(1+k);
+}
+
+/* ---------------------------------------------------------------- *
+ * 9. CIRCUIT BREAKERS
+ * ---------------------------------------------------------------- */
+function checkBreakers(){
+  const eq = S.acct.equity;
+  const dPnl = (eq - S.acct.dayAnchor) / S.acct.dayAnchor;
+  const wPnl = (eq - S.acct.weekAnchor) / S.acct.weekAnchor;
+  const B = S.breaker, was = B.daily || B.weekly || B.streak;
+
+  B.daily  = dPnl <= -CFG.breakers.daily;
+  B.weekly = wPnl <= -CFG.breakers.weekly;
+  B.streak = B.streakCount >= CFG.breakers.streak;
+  if (B.streak && !B.cooldownUntil) B.cooldownUntil = Date.now() + 60_000; // 1 "day" = 60s
+  if (B.cooldownUntil && Date.now() > B.cooldownUntil){ B.cooldownUntil = 0; B.streakCount = 0; B.streak = false; }
+
+  const now = B.daily || B.weekly || B.streak;
+  if (now && !was){
+    const which = B.daily ? `DAILY LOSS ${pct(dPnl)} ≥ 2%`
+                : B.weekly ? `WEEKLY LOSS ${pct(wPnl)} ≥ 5%`
+                : `${B.streakCount} CONSECUTIVE LOSSES`;
+    S.engine = "HALTED";
+    log("ERR", `CIRCUIT BREAKER TRIPPED — ${which}. New entries suspended.`);
+    toast(`<b>Circuit breaker</b><br>${which} — trading paused.`, "r", 8000);
+  }
+  if (!now && was && !S.killed){
+    S.engine = anyStratOn() && anyExOn() ? "RUNNING" : "IDLE";
+    log("INFO","Circuit breakers cleared — engine resumed.");
+  }
+  return { dPnl, wPnl, halted: now };
+}
+const anyStratOn = () => S.strat.playbook.on || S.strat.dualma.on;
+const anyExOn = () => EXCHANGES.some(e => S.ex[e].on);
+const tradingBlocked = () =>
+  S.killed || S.breaker.daily || S.breaker.weekly || S.breaker.streak ||
+  S.breaker.tradesToday >= CFG.breakers.maxTradesDay || !anyExOn() || !anyStratOn();
+
+/* ---------------------------------------------------------------- *
+ * 10. EXECUTION
+ * ---------------------------------------------------------------- */
+/** Random-walk the measured latency of connected venues so routing reflects
+ *  real conditions rather than a fixed winner chosen at connection time. */
+function jitterLatency(){
+  EXCHANGES.forEach(id => {
+    const e = S.ex[id];
+    if (!e.on || e.lat === null) return;
+    e.lat = clamp(Math.round(e.lat + gauss()*7), 11, 320);
+  });
+}
+
+function pickExchange(){
+  const on = EXCHANGES.filter(e => S.ex[e].on);
+  if (!on.length) return null;
+  // route to the lower-latency venue
+  return on.sort((a,b)=>(S.ex[a].lat||999)-(S.ex[b].lat||999))[0];
+}
+
+function openPosition(asset, strat, sig){
+  const ex = pickExchange();
+  if (!ex) return;
+  const p = sig.plan;
+
+  // Sanity gate: SL and TP must straddle entry on the correct sides, or the
+  // position would close instantly at the wrong price.
+  const okGeom = sig.side === "LONG" ? (p.sl < p.entry && p.tp > p.entry)
+                                     : (p.sl > p.entry && p.tp < p.entry);
+  if (!okGeom || !isFinite(p.qty) || p.qty <= 0){
+    log("ERR", `REJECTED ${sig.side} ${asset} — invalid order geometry `
+      + `(entry ${p.entry.toFixed(2)}, SL ${p.sl.toFixed(2)}, TP ${p.tp.toFixed(2)}). Signal discarded.`);
+    return;
+  }
+
+  // At 20× the liquidation band is only ~4.6% wide. A 2×ATR stop on a slow
+  // timeframe can exceed that, which would mean being liquidated before the
+  // stop ever fills. The Risk Matrix flags this case — enforce it here too.
+  const liq = liqPrice(p.entry, sig.side);
+  const liqDist = Math.abs(liq - p.entry);
+  if (p.slDist >= liqDist*0.95){
+    log("ERR", `REJECTED ${sig.side} ${asset} — 2×ATR stop ${(p.slDist/p.entry*100).toFixed(2)}% `
+      + `exceeds the 20× liquidation distance ${(liqDist/p.entry*100).toFixed(2)}%. `
+      + `Cannot be stopped out before liquidation; setup skipped.`);
+    return;
+  }
+
+  const pos = {
+    id: "P-" + uid(), asset, ex, strat, tf: sig.tf || TF[PLAYBOOK_TF].label,
+    side: sig.side, entry: p.entry, qty: p.qty, notional: p.notional,
+    margin: p.margin, sl: p.sl, tp: p.tp, rr: p.rr, slDist: p.slDist,
+    liq: liqPrice(p.entry, sig.side),
+    opened: Date.now(), status: "FILLED", trigger: sig.trigger,
+    riskAmt: p.riskAmt, feePaid: p.notional*CFG.takerFee,
+  };
+  S.acct.fees += pos.feePaid;
+  S.acct.realized -= pos.feePaid;
+  S.positions.push(pos);
+  S.breaker.tradesToday++;
+  S.orders.unshift({ t:Date.now(), id:pos.id, asset, ex, side:sig.side,
+                     type:"MARKET", qty:p.qty, px:p.entry, status:"FILLED", strat });
+  log("EXEC", `${ex.toUpperCase()} ▸ ${sig.side} ${p.qty.toFixed(4)} ${asset} @ ${fmt(p.entry,CFG.assets[asset].dp)} `
+            + `| SL ${fmt(p.sl,CFG.assets[asset].dp)} TP ${fmt(p.tp,CFG.assets[asset].dp)} `
+            + `| RR 1:${p.rr.toFixed(2)} | 20× margin ${usd(p.margin)} | ${strat} @${pos.tf} · ${sig.trigger}`);
+  toast(`<b>${asset} ${sig.side==="LONG"?"做多":"做空"}</b> 已成交 · ${EXNAME[ex]}<br>`
+      + `<span style="font-family:var(--mono);font-size:11px">${p.qty.toFixed(4)} @ ${fmt(p.entry,CFG.assets[asset].dp)} · RR 1:${p.rr.toFixed(2)}</span>`,
+        sig.side==="LONG" ? "g" : "r");
+}
+
+function closePosition(pos, reason, priceOverride){
+  const px = priceOverride ?? S.mkt[pos.asset].last;
+  const dirMul = pos.side === "LONG" ? 1 : -1;
+  const gross = (px - pos.entry) * pos.qty * dirMul;
+  const exitFee = px * pos.qty * CFG.takerFee;
+  const net = gross - exitFee;
+
+  S.acct.realized += net;
+  S.acct.fees += exitFee;
+  S.positions = S.positions.filter(p => p.id !== pos.id);
+  const rec = { ...pos, exit:px, pnl:net, reason, closed:Date.now(),
+                r: net / pos.riskAmt };
+  S.closed.unshift(rec);
+  // The live journal is trimmed for memory; a backtest must keep every trade or
+  // its statistics would silently describe only the most recent 200.
+  if (!S.btMode && S.closed.length > 200) S.closed.length = 200;
+
+  if (net < 0) S.breaker.streakCount++; else S.breaker.streakCount = 0;
+
+  S.orders.unshift({ t:Date.now(), id:pos.id, asset:pos.asset, ex:pos.ex,
+                     side: pos.side==="LONG"?"SELL":"BUY", type:"MARKET",
+                     qty:pos.qty, px, status:"CLOSED", strat:pos.strat });
+  log(net>=0?"RISK":"WARN",
+    `CLOSE ${pos.asset} ${pos.side} @ ${fmt(px,CFG.assets[pos.asset].dp)} · ${reason} · `
+    + `PnL ${sgn(net)} (${rec.r>=0?"+":""}${rec.r.toFixed(2)}R)`);
+  toast(`<b>${pos.asset} 已平倉</b> — ${zhReason(reason)}<br>`
+      + `<span class="${cls(net)}" style="font-family:var(--mono)">${sgn(net)} · ${rec.r>=0?"+":""}${rec.r.toFixed(2)}R</span>`,
+        net>=0?"g":"r");
+}
+
+function managePositions(){
+  [...S.positions].forEach(p => {
+    const px = S.mkt[p.asset].last;
+    // Order matters. The stop always sits nearer to entry than the liquidation
+    // price (enforced at open), so on any monotonic adverse move price crosses
+    // the stop FIRST. Testing liquidation first would book a wipeout whenever a
+    // single tick jumped past both levels, which is not how the fill sequences.
+    if (p.side === "LONG"){
+      if (px <= p.sl)  return closePosition(p, "STOP LOSS", p.sl);
+      if (px >= p.tp)  return closePosition(p, "TAKE PROFIT", p.tp);
+      if (px <= p.liq) return closePosition(p, "LIQUIDATION", p.liq);
+    } else {
+      if (px >= p.sl)  return closePosition(p, "STOP LOSS", p.sl);
+      if (px <= p.tp)  return closePosition(p, "TAKE PROFIT", p.tp);
+      if (px >= p.liq) return closePosition(p, "LIQUIDATION", p.liq);
+    }
+  });
+}
+
+function unrealized(){
+  return S.positions.reduce((s,p) => {
+    const px = S.mkt[p.asset].last;
+    return s + (px - p.entry) * p.qty * (p.side==="LONG"?1:-1);
+  }, 0);
+}
+
+/* ---------------------------------------------------------------- *
+ * 11. ENGINE LOOP
+ * ---------------------------------------------------------------- */
+let evalCache = { playbook:{}, dualma:{} };
+
+function runEngine(){
+  // In backtest mode the timeframes are built incrementally by btAnalyze().
+  // Recomputing here would rebuild them from the small rolling base window,
+  // leaving D1 with a handful of candles and W1 with none.
+  if (!S.btMode) computeIndicators();
+
+  // always evaluate (so the funnel is visible even when disarmed)
+  ASSETS.forEach(a => {
+    evalCache.playbook[a] = evalPlaybook(a);
+    evalCache.dualma[a]   = {};
+    DUALMA_TFS.forEach(k => { evalCache.dualma[a][k] = evalDualMA(a, k); });
+  });
+
+  managePositions();
+  S.acct.equity = S.acct.start + S.acct.realized + unrealized();
+  S.acct.peak = Math.max(S.acct.peak, S.acct.equity);
+  checkBreakers();
+
+  if (!S.killed){
+    const active = anyStratOn() && anyExOn();
+    if (S.engine !== "HALTED") S.engine = active ? "RUNNING" : "IDLE";
+  }
+
+  if (!tradingBlocked()){
+    ASSETS.forEach(a => {
+      if (S.positions.some(p => p.asset === a)) return;   // one position per asset
+      if (S.strat.playbook.on && S.strat.playbook.alloc[a]){
+        const sig = evalCache.playbook[a];
+        if (sig.ok){ openPosition(a, "PLAYBOOK", sig); return; }
+      }
+      if (S.strat.dualma.on && S.strat.dualma.alloc[a]){
+        // higher timeframe wins when both fire on the same bar
+        for (const k of ["h4","m15"]){
+          if (!S.strat.dualma.tf[k]) continue;
+          const sig = evalCache.dualma[a][k];
+          if (sig && sig.ok){ openPosition(a, "DUAL-MA", sig); return; }
+        }
+      }
+    });
+  }
+
+  // equity curve sample
+  S.equityCurve.push(S.acct.equity);
+  if (S.equityCurve.length > 240) S.equityCurve.shift();
+}
+
+/* ---------------------------------------------------------------- *
+ * 11b. BACKTEST ENGINE
+ * ------------------------------------------------------------------
+ * Runs the SAME evalPlaybook / evalDualMA / sizePosition code the live
+ * engine uses, by swapping the globals they read for a backtest world.
+ * If the strategy logic changes, the backtest changes with it.
+ *
+ * Higher timeframes are aggregated incrementally onto a fixed grid and
+ * re-analyzed only when their candle closes — both far faster than
+ * re-resampling every bar and closer to real bar-close discipline.
+ * ---------------------------------------------------------------- */
+const BT = {
+  running:false, cancel:false, pct:0, phase:"",
+  cfg: { years:10, equity:10000, regime:"neutral", volScale:1.0, seed:"",
+         playbook:true, dualma:true, m15:true, h4:true, breakers:true },
+  res: null,
+};
+// Windows must match TF[].cap so the backtest analyses exactly what live does.
+const BTCAP = { m15:TF.m15.cap, h1:TF.h1.cap, h4:TF.h4.cap, d1:TF.d1.cap, w1:TF.w1.cap };
+const BT_SKIP = { h1:true };         // no strategy reads 1H — don't pay for it
+const BARS_PER_DAY = 96, BARS_PER_YEAR = 96*365;
+const BT_WARMUP = 26880;             // 280 days so W1 has ~40 candles before trading
+
+/** Deterministic PRNG so a seed reproduces a run exactly. */
+function mulberry32(seed){
+  let t = seed >>> 0;
+  return function(){
+    t = (t + 0x6D2B79F5) >>> 0;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hashSeed(s){
+  let h = 2166136261;
+  for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+const BT_REGIMES = {
+  neutral: { up:0.40, dn:0.40, label:"Neutral (balanced)" },
+  bull:    { up:0.62, dn:0.20, label:"Bull-biased" },
+  bear:    { up:0.20, dn:0.62, label:"Bear-biased" },
+  chop:    { up:0.24, dn:0.24, label:"Choppy / range-heavy" },
+};
+
+function btWorld(cfg){
+  const W = {};
+  ASSETS.forEach(a => {
+    const c = CFG.assets[a];
+    W[a] = {
+      bars: [], agg: {}, tf: {}, ind:null,
+      last: c.px, prev: c.px, dayOpen: c.px,
+      drift: 0, regime: 1, act: 1, barIdx: -1,
+      cross:{ m15:null, h4:null },
+      seen: { m15:{bar:-1,above:null}, h4:{bar:-1,above:null} },
+      fresh: {},
+    };
+    ["h1","h4","d1","w1"].forEach(k => { W[a].agg[k] = { acc:null, n:0, bars:[] }; });
+  });
+  return W;
+}
+
+function btDrift(vol, cfg){
+  const R = BT_REGIMES[cfg.regime] || BT_REGIMES.neutral;
+  const r = Math.random();
+  const d = vol * CFG.trendStrength * (0.75 + Math.random()*0.6);
+  if (r < R.up) return d;
+  if (r < R.up + R.dn) return -d;
+  return 0;                                  // ranging regime
+}
+
+/** Advance one 15m bar and fold it into every higher timeframe. */
+function btStep(m, a, cfg){
+  const c = CFG.assets[a];
+  const vol = c.vol * cfg.volScale;
+  if (--m.regime <= 0){
+    m.drift = btDrift(c.vol, cfg) * cfg.volScale;
+    if (m.last > c.px*9)        m.drift = -Math.abs(m.drift);
+    else if (m.last < c.px*0.12) m.drift =  Math.abs(m.drift);
+    m.regime = nextRegime();
+  }
+  const o = m.last;
+  const shock = gauss()*vol;
+  m.prev = m.last;
+  m.last = m.last * (1 + m.drift + shock);
+  const h = Math.max(o,m.last) * (1 + Math.abs(gauss())*vol*0.42);
+  const l = Math.min(o,m.last) * (1 - Math.abs(gauss())*vol*0.42);
+  m.act = clamp(m.act + (1-m.act)*0.01 + gauss()*0.05*m.act, 0.3, 3.2);
+  const bar = { o, h, l, c:m.last, v: VOL_MEAN*(0.45 + Math.abs(shock)/vol*0.69)*m.act };
+
+  m.bars.push(bar);
+  if (m.bars.length > BTCAP.m15) m.bars.shift();
+  m.barIdx++;
+  m.fresh = { m15:true };
+
+  for (const k of ["h1","h4","d1","w1"]){
+    const g = m.agg[k], r = TF[k].ratio;
+    if (!g.acc){ g.acc = { o:bar.o, h:bar.h, l:bar.l, c:bar.c, v:bar.v }; g.n = 1; }
+    else {
+      if (bar.h > g.acc.h) g.acc.h = bar.h;
+      if (bar.l < g.acc.l) g.acc.l = bar.l;
+      g.acc.c = bar.c; g.acc.v += bar.v; g.n++;
+    }
+    if (g.n >= r){
+      g.bars.push(g.acc);
+      if (g.bars.length > BTCAP[k]) g.bars.shift();
+      g.acc = null; g.n = 0;
+      m.fresh[k] = true;                      // candle closed → re-analyze
+    }
+  }
+  if (m.barIdx % BARS_PER_DAY === 0)
+    m.dayOpen = m.bars.length>1 ? m.bars[Math.max(0,m.bars.length-BARS_PER_DAY)].c : m.last;
+}
+
+/** Re-analyze only the timeframes whose candle just closed. */
+function btAnalyze(m){
+  for (const k in TF){
+    if (BT_SKIP[k]) continue;
+    if (!m.fresh[k] && m.tf[k]) continue;
+    const t = TF[k];
+    let src;
+    if (k === "m15") src = m.bars;
+    else {
+      const g = m.agg[k];
+      // include the forming candle, exactly as a live chart shows it
+      src = g.acc ? g.bars.concat([g.acc]) : g.bars;
+    }
+    if (src.length < 30) { m.tf[k] = m.tf[k] || null; continue; }
+    m.tf[k] = analyze(src, t.lr);
+    m.tf[k].key = k; m.tf[k].label = t.label;
+    m.tf[k].barIdx = Math.floor(m.barIdx / t.ratio);
+  }
+  m.ind = m.tf[PLAYBOOK_TF];
+  DUALMA_TFS.forEach(k => {
+    const I = m.tf[k]; if (!I) return;
+    const seen = m.seen[k];
+    if (seen.bar !== I.barIdx){
+      seen.bar = I.barIdx;
+      const above = I.fast > I.slow;
+      if (seen.above !== null && above !== seen.above)
+        m.cross[k] = { dir: above ? "UP":"DOWN", at:I.barIdx };
+      seen.above = above;
+    }
+  });
+}
+
+function btMetrics(trades, curve, cfg, days){
+  const n = trades.length;
+  const wins = trades.filter(t=>t.pnl>0), losses = trades.filter(t=>t.pnl<=0);
+  const gw = wins.reduce((s,t)=>s+t.pnl,0), gl = Math.abs(losses.reduce((s,t)=>s+t.pnl,0));
+  const start = cfg.equity, end = curve.length ? curve[curve.length-1] : start;
+  const years = days/365;
+
+  let peak = start, maxDD = 0, ddStart = 0, maxDDDays = 0, curDDDays = 0;
+  curve.forEach(v => {
+    if (v > peak){ peak = v; curDDDays = 0; }
+    else { curDDDays++; if (curDDDays > maxDDDays) maxDDDays = curDDDays; }
+    const dd = (v-peak)/peak;
+    if (dd < maxDD) maxDD = dd;
+  });
+
+  const rets = [];
+  for (let i=1;i<curve.length;i++) if (curve[i-1]>0) rets.push(curve[i]/curve[i-1]-1);
+  const mean = rets.length ? rets.reduce((a,b)=>a+b,0)/rets.length : 0;
+  const sd = rets.length>1
+    ? Math.sqrt(rets.reduce((s,r)=>s+(r-mean)**2,0)/(rets.length-1)) : 0;
+  const sharpe = sd>0 ? (mean/sd)*Math.sqrt(365) : 0;
+  const downside = rets.filter(r=>r<0);
+  const dsd = downside.length>1
+    ? Math.sqrt(downside.reduce((s,r)=>s+r*r,0)/downside.length) : 0;
+  const sortino = dsd>0 ? (mean/dsd)*Math.sqrt(365) : 0;
+
+  let streak=0, worstStreak=0, winStreak=0, bestStreak=0;
+  trades.forEach(t=>{
+    if (t.pnl<=0){ streak++; winStreak=0; if(streak>worstStreak)worstStreak=streak; }
+    else { winStreak++; streak=0; if(winStreak>bestStreak)bestStreak=winStreak; }
+  });
+
+  const cagr = years>0 && end>0 ? Math.pow(end/start, 1/years)-1 : 0;
+  const grouped = k => trades.reduce((m,t)=>{ m[t[k]]=(m[t[k]]||0)+t.pnl; return m; },{});
+  const counted = k => trades.reduce((m,t)=>{ m[t[k]]=(m[t[k]]||0)+1; return m; },{});
+
+  return {
+    start, end, netProfit:end-start, totalReturn:(end-start)/start, cagr,
+    maxDD, maxDDDays, sharpe, sortino,
+    trades:n, wins:wins.length, losses:losses.length,
+    winRate: n?wins.length/n:0,
+    profitFactor: gl>0?gw/gl:(gw>0?Infinity:0),
+    expectancyR: n?trades.reduce((s,t)=>s+t.r,0)/n:0,
+    avgWinR: wins.length?wins.reduce((s,t)=>s+t.r,0)/wins.length:0,
+    avgLossR: losses.length?losses.reduce((s,t)=>s+t.r,0)/losses.length:0,
+    tradesPerWeek: days>0 ? n/(days/7) : 0,
+    worstStreak, bestStreak,
+    liquidations: trades.filter(t=>t.reason==="LIQUIDATION").length,
+    fees: trades.reduce((s,t)=>s+(t.feePaid||0),0),
+    pnlByStrat: grouped("strat"), pnlByTF: grouped("tf"), pnlByAsset: grouped("asset"),
+    cntByStrat: counted("strat"), cntByTF: counted("tf"), cntByAsset: counted("asset"),
+    days, years,
+  };
+}
+
+function startBacktest(){
+  if (BT.running) return;
+  const cfg = { ...BT.cfg };
+  BT.running = true; BT.cancel = false; BT.pct = 0; BT.phase = "Seeding market…"; BT.res = null;
+  S.paused = true;                                   // freeze the live engine
+  S.btMode = true;                                   // engine reads BT-built timeframes
+
+  const seedStr = (cfg.seed||"").trim();
+  const seedNum = seedStr ? hashSeed(seedStr) : (Math.random()*1e9)|0;
+  const rng = mulberry32(seedNum);
+  const realRandom = Math.random;
+  Math.random = rng;                                 // makes the whole run reproducible
+
+  // swap in a private account/world so the live session is untouched
+  const live = { mkt:S.mkt, acct:S.acct, positions:S.positions, closed:S.closed,
+                 orders:S.orders, breaker:S.breaker, strat:S.strat, killed:S.killed, ex:S.ex };
+  const W = btWorld(cfg);
+  S.mkt = W;
+  S.acct = { start:cfg.equity, equity:cfg.equity, realized:0, fees:0,
+             dayAnchor:cfg.equity, weekAnchor:cfg.equity, peak:cfg.equity };
+  S.positions = []; S.closed = []; S.orders = []; S.killed = false;
+  S.breaker = { daily:false, weekly:false, streak:false, cooldownUntil:0, streakCount:0, tradesToday:0 };
+  S.strat = { playbook:{ on:cfg.playbook, alloc:{BTC:true,ETH:true,SOL:true} },
+              dualma:{ on:cfg.dualma, alloc:{BTC:true,ETH:true,SOL:true},
+                       tf:{ m15:cfg.m15, h4:cfg.h4 },
+                       fast:live.strat.dualma.fast, slow:live.strat.dualma.slow,
+                       adxMin:live.strat.dualma.adxMin, volMult:live.strat.dualma.volMult,
+                       useTrendFilter:live.strat.dualma.useTrendFilter } };
+  S.ex = { binance:{on:true,key:"bt",secret:"bt",pass:"",lat:40,tier:"VIP 1",testing:false},
+           bitget: {on:true,key:"bt",secret:"bt",pass:"bt",lat:44,tier:"VIP 0",testing:false} };
+
+  const total = BT_WARMUP + cfg.years*BARS_PER_YEAR;
+  const curve = [], monthly = [];
+  let i = 0, tradedDays = 0, monthAnchor = cfg.equity, exposureBars = 0;
+
+  const finish = (aborted) => {
+    Math.random = realRandom;
+    const days = (i - BT_WARMUP)/BARS_PER_DAY;
+    const trades = S.closed.slice().reverse();
+    const res = btMetrics(trades, curve, cfg, Math.max(1,days));
+    // NB: res.trades is the COUNT from btMetrics — keep the list separate.
+    res.curve = curve; res.monthly = monthly; res.tradeList = trades;
+    res.seed = seedStr || String(seedNum); res.cfg = cfg; res.aborted = aborted;
+    res.exposure = days>0 ? exposureBars/((i-BT_WARMUP)||1) : 0;
+    res.breakerTrips = S.logs.filter(l=>l.msg.includes("CIRCUIT BREAKER")).length;
+    // restore the live session exactly as it was
+    S.mkt=live.mkt; S.acct=live.acct; S.positions=live.positions; S.closed=live.closed;
+    S.orders=live.orders; S.breaker=live.breaker; S.strat=live.strat;
+    S.killed=live.killed; S.ex=live.ex;
+    S.paused = false; S.btMode = false;
+    BT.running = false; BT.res = res; BT.pct = 1;
+    BT.phase = aborted ? "Cancelled" : "Complete";
+    log(aborted?"WARN":"INFO",
+      aborted ? "Backtest cancelled by operator."
+      : `Backtest complete — ${cfg.years}y · ${res.trades} trades · `
+        + `return ${pct(res.totalReturn)} · CAGR ${pct(res.cagr)} · maxDD ${pct(res.maxDD)} · seed ${res.seed}`);
+    if (S.view === "backtest") switchView("backtest");
+    else repaint();
+    if (!aborted) toast(`<b>回測完成</b><br>`
+      + `<span style="font-family:var(--mono);font-size:11px">${cfg.years}y · ${res.trades} trades · `
+      + `${pct(res.totalReturn)} · maxDD ${pct(res.maxDD)}</span>`,
+      res.totalReturn>0?"g":"r", 8000);
+  };
+
+  const CHUNK = 3000;
+  function chunk(){
+    if (BT.cancel) return finish(true);
+    const stop = Math.min(i + CHUNK, total);
+    for (; i<stop; i++){
+      const warming = i < BT_WARMUP;
+      ASSETS.forEach(a => { btStep(W[a], a, cfg); btAnalyze(W[a]); });
+      if (!W.BTC.tf[PLAYBOOK_TF]) continue;
+
+      if (!warming){
+        const bIdx = i - BT_WARMUP;
+        if (bIdx % BARS_PER_DAY === 0){
+          S.breaker.tradesToday = 0;
+          S.acct.dayAnchor = S.acct.equity;
+          S.breaker.daily = false; S.breaker.cooldownUntil = 0;
+          if (S.breaker.streak){ S.breaker.streak=false; S.breaker.streakCount=0; }
+          curve.push(S.acct.equity); tradedDays++;
+        }
+        if (bIdx % (BARS_PER_DAY*7) === 0){ S.acct.weekAnchor = S.acct.equity; S.breaker.weekly=false; }
+        if (bIdx % (BARS_PER_DAY*30) === 0 && bIdx>0){
+          monthly.push((S.acct.equity-monthAnchor)/monthAnchor);
+          monthAnchor = S.acct.equity;
+        }
+        if (!cfg.breakers)
+          S.breaker = { daily:false,weekly:false,streak:false,cooldownUntil:0,streakCount:0,tradesToday:0 };
+        if (S.positions.length) exposureBars++;
+        runEngine();
+      }
+    }
+    BT.pct = i/total;
+    BT.phase = i < BT_WARMUP
+      ? `Warming up indicators… ${(100*i/BT_WARMUP).toFixed(0)}%`
+      : `Simulating year ${Math.min(cfg.years, Math.floor((i-BT_WARMUP)/BARS_PER_YEAR)+1)} of ${cfg.years}`;
+    if (S.view === "backtest") V.backtest.progress();
+    if (i >= total) return finish(false);
+    setTimeout(chunk, 0);
+  }
+  log("INFO", `Backtest started — ${cfg.years}y · ${BT_REGIMES[cfg.regime].label} · `
+    + `vol ×${cfg.volScale} · seed ${seedStr||seedNum}`);
+  setTimeout(chunk, 30);
+}
+
+/* ---------------------------------------------------------------- *
+ * 12. SPARKLINE / CURVE RENDERERS
+ * ---------------------------------------------------------------- */
+function sparkline(vals, w=260, h=38, color){
+  if (!vals || vals.length < 2) return "";
+  const lo = Math.min(...vals), hi = Math.max(...vals), rng = (hi-lo)||1;
+  const pts = vals.map((v,i)=>{
+    const x = (i/(vals.length-1))*w;
+    const y = h - ((v-lo)/rng)*(h-4) - 2;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const c = color || (vals[vals.length-1] >= vals[0] ? "var(--up)" : "var(--dn)");
+  const gid = "g"+Math.random().toString(36).slice(2,8);
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${c}" stop-opacity=".26"/>
+      <stop offset="100%" stop-color="${c}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="0,${h} ${pts.join(" ")} ${w},${h}" fill="url(#${gid})"/>
+    <polyline points="${pts.join(" ")}" fill="none" stroke="${c}" stroke-width="1.6"
+      stroke-linejoin="round" stroke-linecap="round"/>
+  </svg>`;
+}
+
+function equityChart(vals, w=760, h=180){
+  if (!vals || vals.length < 2)
+    return `<div class="empty"><div class="big">◠</div>資金曲線收集中…</div>`;
+  const lo = Math.min(...vals, S.acct.start), hi = Math.max(...vals, S.acct.start);
+  const rng = (hi-lo)||1, pad = 22;
+  const X = i => pad + (i/(vals.length-1))*(w-pad-52);
+  const Y = v => h-pad - ((v-lo)/rng)*(h-pad*2);
+  const pts = vals.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const up = vals[vals.length-1] >= S.acct.start;
+  const c = up ? "var(--up)" : "var(--dn)";
+  const y0 = Y(S.acct.start);
+  const grid = [0,.25,.5,.75,1].map(f=>{
+    const y = h-pad-(f*(h-pad*2)), val = lo+f*rng;
+    return `<line x1="${pad}" y1="${y}" x2="${w-52}" y2="${y}" stroke="var(--line)" stroke-width="1" opacity=".5"/>
+            <text x="${w-46}" y="${y+3.5}" fill="var(--tx4)" font-size="9.5" font-family="var(--mono)">${fmt(val,0)}</text>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px;display:block">
+    ${grid}
+    <line x1="${pad}" y1="${y0}" x2="${w-52}" y2="${y0}" stroke="var(--tx4)" stroke-width="1"
+      stroke-dasharray="4 4" opacity=".7"/>
+    <text x="${pad+3}" y="${y0-5}" fill="var(--tx4)" font-size="9" font-family="var(--mono)">START ${fmt(S.acct.start,0)}</text>
+    <polygon points="${pad},${h-pad} ${pts} ${X(vals.length-1)},${h-pad}" fill="${c}" opacity=".10"/>
+    <polyline points="${pts}" fill="none" stroke="${c}" stroke-width="1.9" stroke-linejoin="round"/>
+    <circle cx="${X(vals.length-1)}" cy="${Y(vals[vals.length-1])}" r="3.2" fill="${c}"/>
+  </svg>`;
+}
+
+/* ---------------------------------------------------------------- *
+ * 13. VIEWS
+ * ---------------------------------------------------------------- */
+const V = {};
+
+/* ---------------------------------------------------------------- *
+ * 12b. 即時行情 LIVE MARKET DATA
+ * ------------------------------------------------------------------
+ * Real BTC/ETH/SOL prices straight from Binance's PUBLIC market feed.
+ * Public market data is CORS-open and needs no API key — it is only the
+ * SIGNED endpoints (orders, balances) that a browser cannot reach, which
+ * is why trading still requires a backend but quotes do not.
+ *
+ * This is display-only and deliberately kept separate from the trading
+ * simulation below it: positions are filled at simulated prices, so
+ * mixing a real mark into that P&L would make the numbers incoherent.
+ * ---------------------------------------------------------------- */
+const LIVE = {
+  on: true,
+  ws: null,
+  status: "idle",          // idle | connecting | open | polling | error | off
+  source: "",
+  data: {},                // BTC: {px, prev, chg, high, low, vol, quote, t}
+  hist: {},                // BTC: [recent prices] for the sparkline
+  err: "", retries: 0, reconnectTimer: null, pollTimer: null,
+};
+ASSETS.forEach(a => { LIVE.hist[a] = []; });
+
+const WS_SYM = { BTC:"btcusdt", ETH:"ethusdt", SOL:"solusdt" };
+const SYM_ASSET = { BTCUSDT:"BTC", ETHUSDT:"ETH", SOLUSDT:"SOL" };
+
+function liveApply(sym, o){
+  const a = SYM_ASSET[sym]; if (!a) return;
+  const prev = LIVE.data[a] ? LIVE.data[a].px : o.px;
+  LIVE.data[a] = { ...o, prev, t: Date.now() };
+  const h = LIVE.hist[a];
+  h.push(o.px);
+  if (h.length > 120) h.shift();
+}
+
+function liveClose(){
+  if (LIVE.reconnectTimer){ clearTimeout(LIVE.reconnectTimer); LIVE.reconnectTimer = null; }
+  if (LIVE.pollTimer){ clearInterval(LIVE.pollTimer); LIVE.pollTimer = null; }
+  if (LIVE.ws){
+    try { LIVE.ws.onclose = null; LIVE.ws.close(); } catch(e){}
+    LIVE.ws = null;
+  }
+}
+
+function liveConnect(){
+  if (!LIVE.on) return;
+  liveClose();
+  LIVE.status = "connecting"; LIVE.err = "";
+  const streams = ASSETS.map(a => WS_SYM[a] + "@ticker").join("/");
+  let ws;
+  try {
+    ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+  } catch(e){
+    LIVE.err = e.message; livePollStart(); return;
+  }
+  LIVE.ws = ws;
+
+  ws.onopen = () => {
+    LIVE.status = "open"; LIVE.source = "WebSocket"; LIVE.retries = 0;
+    if (LIVE.pollTimer){ clearInterval(LIVE.pollTimer); LIVE.pollTimer = null; }
+    log("INFO", "即時行情已連線 — Binance 公開 WebSocket(僅行情,不含帳戶)。");
+  };
+  ws.onmessage = ev => {
+    let m; try { m = JSON.parse(ev.data); } catch(e){ return; }
+    const d = m.data || m;
+    if (!d || !d.s) return;
+    liveApply(d.s, {
+      px:+d.c, chg:+d.P/100, high:+d.h, low:+d.l,
+      vol:+d.v, quote:+d.q, open:+d.o,
+    });
+  };
+  ws.onerror = () => { LIVE.err = "WebSocket 連線失敗"; };
+  ws.onclose = () => {
+    if (!LIVE.on) { LIVE.status = "off"; return; }
+    LIVE.retries++;
+    if (LIVE.retries >= 3){ livePollStart(); return; }   // fall back to REST
+    LIVE.status = "connecting";
+    const wait = Math.min(15000, 1200 * LIVE.retries);
+    LIVE.reconnectTimer = setTimeout(liveConnect, wait);
+  };
+}
+
+/** REST fallback — used when WebSockets are blocked (some networks/proxies). */
+async function livePoll(){
+  if (!LIVE.on) return;
+  const syms = encodeURIComponent(JSON.stringify(ASSETS.map(a => WS_SYM[a].toUpperCase())));
+  try {
+    const r = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbols=${syms}`,
+                          { cache:"no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const rows = await r.json();
+    rows.forEach(d => liveApply(d.symbol, {
+      px:+d.lastPrice, chg:+d.priceChangePercent/100, high:+d.highPrice,
+      low:+d.lowPrice, vol:+d.volume, quote:+d.quoteVolume, open:+d.openPrice,
+    }));
+    LIVE.status = "polling"; LIVE.source = "REST"; LIVE.err = "";
+  } catch(e){
+    LIVE.status = "error";
+    LIVE.err = "無法取得行情(可能是離線、防火牆或所在地區封鎖 Binance)";
+  }
+}
+function livePollStart(){
+  if (LIVE.pollTimer) return;
+  LIVE.status = "polling"; LIVE.source = "REST";
+  log("WARN", "即時行情改用 REST 輪詢(WebSocket 無法連線)。");
+  livePoll();
+  LIVE.pollTimer = setInterval(livePoll, 5000);
+}
+
+function liveToggle(on){
+  LIVE.on = on;
+  if (on){ LIVE.retries = 0; liveConnect(); log("INFO","已開啟即時行情。"); }
+  else { liveClose(); LIVE.status = "off";
+         log("INFO","已關閉即時行情(不再連線外部伺服器)。"); }
+}
+
+function liveStatusChip(){
+  const m = {
+    open:    ["g","即時連線中"],
+    polling: ["a","輪詢中 · 5 秒"],
+    connecting:["a","連線中…"],
+    error:   ["r","連線失敗"],
+    off:     ["n","已關閉"],
+    idle:    ["n","尚未連線"],
+  }[LIVE.status] || ["n","—"];
+  return `<span class="chip ${m[0]}">${m[1]}</span>`;
+}
+
+/* ------------------------------ 主控台 CONSOLE ------------------ */
+/* One operating screen: is it running, what is my money doing, what is
+   open, stop it. Everything diagnostic lives behind a disclosure. */
+
+const ZH_REASON = { "STOP LOSS":"止損", "TAKE PROFIT":"止盈", "LIQUIDATION":"強制平倉",
+                    "MANUAL CLOSE":"手動平倉", "KILL SWITCH":"緊急停止" };
+const zhReason = r => ZH_REASON[r] || r;
+const zhSide   = s => s === "LONG" ? "做多" : "做空";
+
+/** Plain-language answer to "what is the bot doing right now?" */
+function botStatus(){
+  const nEx = EXCHANGES.filter(e => S.ex[e].on).length;
+  const nSt = (S.strat.playbook.on?1:0) + (S.strat.dualma.on?1:0);
+  if (S.killed)
+    return { k:"bad", ic:"■", a:"已緊急停止",
+             b:"所有持倉已平倉,策略已關閉。重新啟動後才會再進場。",
+             act:`<button class="btn grn" data-action="kill">重新啟動</button>` };
+  if (S.breaker.daily || S.breaker.weekly || S.breaker.streak)
+    return { k:"bad", ic:"⛔", a:"風控已暫停交易",
+             b: S.breaker.daily ? "當日虧損達 2% — 今日不再開新倉。"
+              : S.breaker.weekly ? "當週虧損達 5% — 本週不再開新倉。"
+              : "連續 3 筆虧損 — 冷卻中,暫不開新倉。",
+             act:`<button class="btn sm" data-action="reset-breakers">解除限制</button>` };
+  if (!nEx)
+    return { k:"off", ic:"○", a:"尚未連線交易所",
+             b:"到「設定」填入 API 金鑰並測試連線,機器人才能運作。",
+             act:`<button class="btn pri" data-action="nav" data-view="setup">前往設定</button>` };
+  if (!nSt)
+    return { k:"off", ic:"○", a:"策略未啟動",
+             b:`已連線 ${nEx} 個交易所,但沒有啟用任何策略。`,
+             act:`<button class="btn pri" data-action="start-all">啟動策略</button>` };
+  if (S.breaker.tradesToday >= CFG.breakers.maxTradesDay)
+    return { k:"warn", ic:"◐", a:"今日已達交易上限",
+             b:`已開 ${S.breaker.tradesToday} 筆(上限 ${CFG.breakers.maxTradesDay} 筆)。持倉照常管理,不再開新倉。`,
+             act:"" };
+  return { k:"on", ic:"●", a:"機器人執行中",
+           b:`監控 BTC · ETH · SOL,${nSt} 個策略運行中,20× 逐倉。符合條件才會自動進場。`,
+           act:`<button class="btn sm" data-action="stop-all">暫停策略</button>` };
+}
+
+/** One short line describing what a strategy is waiting for on this asset. */
+function assetWaiting(a){
+  const pos = S.positions.find(p => p.asset === a);
+  if (pos){
+    const px = S.mkt[a].last;
+    const pnl = (px-pos.entry)*pos.qty*(pos.side==="LONG"?1:-1);
+    return { txt:`持倉中 · ${zhSide(pos.side)} · ${sgn(pnl)}`, cls: pnl>=0?"up":"dn", pos:true };
+  }
+  if (!anyExOn() || !anyStratOn()) return { txt:"未啟動", cls:"t4" };
+  const pb = evalCache.playbook[a];
+  const dm = evalCache.dualma[a] || {};
+  const live = DUALMA_TFS.filter(k => dm[k] && dm[k].ok);
+  if (live.length) return { txt:`雙均線 ${TF[live[0]].label} 訊號成立`, cls:"vio" };
+  if (pb && pb.ok)  return { txt:"7 關全過 · 準備進場", cls:"up" };
+  if (pb){
+    const passed = pb.gates.filter(g=>g.state==="pass").length;
+    const at = pb.gates.find(g=>g.state==="fail"||g.state==="wait");
+    return { txt:`等待中 · 第 ${passed+1}/7 關(${at?GATE_ZH[at.n-1]:"—"})`, cls:"t3", gate:passed };
+  }
+  return { txt:"評估中…", cls:"t3" };
+}
+
+V.console = {
+  mount(){
+    return `
+    <div class="wrapn">
+      <div id="haltbar"></div>
+      <div id="c-status"></div>
+
+      <!-- 即時行情 — REAL exchange data, separate from the simulation below -->
+      <div class="panel" style="margin-bottom:12px;border-color:rgba(75,159,225,.34)">
+        <div class="ph" style="background:rgba(75,159,225,.07)">
+          <span class="livehead">
+            <span class="t">即時行情</span>
+            <span class="chip b">真實市場數據</span>
+            <span id="l-status">${liveStatusChip()}</span>
+            <span class="src" id="l-src"></span>
+          </span>
+          <span class="sp">
+            <label class="sw" title="開啟後會連線 Binance 公開行情伺服器">
+              <input type="checkbox" data-action="live-toggle" ${LIVE.on?"checked":""}>
+              <span class="tr"></span></label>
+          </span>
+        </div>
+        <div class="pb"><div class="lgrid" id="l-cards"></div>
+          <div id="l-note"></div></div>
+      </div>
+
+      <div class="grid g2" style="margin-bottom:12px">
+        <div class="big"><div class="k">總資產</div>
+          <div class="v" id="c-eq">—</div><div class="s" id="c-eq-s">—</div></div>
+        <div class="big"><div class="k">總盈虧</div>
+          <div class="v" id="c-pnl">—</div><div class="s" id="c-pnl-s">—</div></div>
+      </div>
+
+      <div class="minirow" id="c-mini"></div>
+
+      <div class="panel" style="margin-bottom:12px">
+        <div class="ph"><span class="t">市場與策略狀態</span>
+          <span class="sp"><span class="chip n" id="c-clock">—</span></span></div>
+        <div class="pb tight" id="c-assets"></div>
+      </div>
+
+      <div class="panel" style="margin-bottom:12px">
+        <div class="ph"><span class="t">持倉中</span>
+          <span class="sp" id="c-pos-act"></span></div>
+        <div class="pb tight" id="c-pos"></div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><span class="t">最近交易</span>
+          <span class="s" id="c-recent-s">—</span></div>
+        <div class="pb tight" id="c-recent"></div>
+      </div>
+
+      <details class="more">
+        <summary>進場關卡明細 — 為什麼還沒進場</summary>
+        <div class="inner tight" id="c-gates"></div>
+      </details>
+
+      <details class="more">
+        <summary>系統訊息</summary>
+        <div class="inner tight" style="max-height:300px;overflow-y:auto" id="c-logs"></div>
+      </details>
+
+      ${DISCLAIMER}
+    </div>`;
+  },
+
+  refresh(){
+    renderHaltBar("#haltbar");
+    renderLive();
+    const st = botStatus();
+    setHTML("#c-status", `<div class="status ${st.k}">
+      <div class="ic">${st.ic}</div>
+      <div class="msg"><div class="a">${st.a}</div><div class="b">${st.b}</div></div>
+      <div class="act">${st.act}</div></div>`);
+
+    const clk = $("#c-clock");
+    if (clk) clk.textContent = clock() + (S.testnet ? " · 測試網" : " · 主網");
+
+    const uPnl = unrealized();
+    const total = S.acct.equity - S.acct.start;
+    const dayPnl = S.acct.equity - S.acct.dayAnchor;
+    const wins = S.closed.filter(c=>c.pnl>0).length;
+
+    const eq = $("#c-eq"), eqs = $("#c-eq-s");
+    if (eq){ eq.textContent = usd(S.acct.equity); eq.className = "v"; }
+    if (eqs) eqs.textContent = `起始 ${usd(S.acct.start,0)}`;
+    const pn = $("#c-pnl"), pns = $("#c-pnl-s");
+    if (pn){ pn.textContent = sgn(total); pn.className = "v " + cls(total); }
+    if (pns) pns.textContent = pct(total/S.acct.start);
+
+    setHTML("#c-mini", `
+      <div><div class="k">今日盈虧</div><div class="v ${cls(dayPnl)}">${sgn(dayPnl)}</div></div>
+      <div><div class="k">未實現</div><div class="v ${cls(uPnl)}">${sgn(uPnl)}</div></div>
+      <div><div class="k">持倉</div><div class="v">${S.positions.length}</div></div>
+      <div><div class="k">已完成</div><div class="v">${S.closed.length} 筆</div></div>
+      <div><div class="k">勝率</div><div class="v">${S.closed.length?((wins/S.closed.length)*100).toFixed(0)+"%":"—"}</div></div>`);
+
+    setHTML("#c-assets", ASSETS.map(a=>{
+      const m = S.mkt[a], c = CFG.assets[a];
+      const chg = (m.last-m.dayOpen)/m.dayOpen;
+      const flash = m.last>m.prev ? "flashu" : m.last<m.prev ? "flashd" : "";
+      const w = assetWaiting(a);
+      const H4 = m.tf && m.tf.h4;
+      const trend = H4 ? (H4.st.dir!=="NONE"?H4.st.dir:H4.stage.dir) : "NONE";
+      return `<div class="arow">
+        <span class="sym">${a}</span>
+        <span class="px ${flash}">${fmt(m.last,c.dp)}</span>
+        <span class="chg ${cls(chg)}">${pct(chg)}</span>
+        ${sparkline(m.bars.slice(-320).filter((_,i)=>i%4===0).map(b=>b.c),96,26)}
+        <span class="st ${w.cls}">${w.txt}</span>
+        <span class="rt"><span class="chip ${trend==="UP"?"g":trend==="DOWN"?"r":"n"}">
+          ${trend==="UP"?"上升":trend==="DOWN"?"下降":"無趨勢"}</span></span>
+      </div>`;
+    }).join(""));
+
+    const pa = $("#c-pos-act");
+    if (pa) pa.innerHTML = S.positions.length
+      ? `<button class="btn sm red" data-action="close-all">全部平倉</button>` : "";
+
+    setHTML("#c-pos", S.positions.length ? `<div class="tw"><table>
+      <thead><tr><th>幣種</th><th>方向</th><th class="n">進場價</th><th class="n">現價</th>
+        <th class="n">未實現盈虧</th><th class="n">止損</th><th class="n">止盈</th><th></th></tr></thead>
+      <tbody>${S.positions.map(p=>{
+        const px = S.mkt[p.asset].last, c = CFG.assets[p.asset];
+        const pnl = (px-p.entry)*p.qty*(p.side==="LONG"?1:-1);
+        return `<tr>
+          <td class="mono" style="color:var(--tx);font-weight:600">${p.asset}
+            <span class="chip n" style="margin-left:5px">${p.tf}</span></td>
+          <td><span class="chip ${p.side==="LONG"?"g":"r"}">${zhSide(p.side)}</span></td>
+          <td class="n">${fmt(p.entry,c.dp)}</td>
+          <td class="n" style="color:var(--tx)">${fmt(px,c.dp)}</td>
+          <td class="n ${cls(pnl)}" style="font-weight:700">${sgn(pnl)}
+            <span class="t4" style="font-size:10.5px">(${pct(pnl/p.margin,1)})</span></td>
+          <td class="n dn">${fmt(p.sl,c.dp)}</td>
+          <td class="n up">${fmt(p.tp,c.dp)}</td>
+          <td><button class="btn sm" data-action="close-one" data-id="${p.id}">平倉</button></td>
+        </tr>`;}).join("")}</tbody></table></div>`
+      : `<div class="empty">目前沒有持倉。<br><span style="font-size:11.5px">
+         ${tradingBlocked()?"目前不允許開新倉。":"條件符合時會自動進場。"}</span></div>`);
+
+    const rs = $("#c-recent-s");
+    if (rs) rs.textContent = S.closed.length ? `共 ${S.closed.length} 筆` : "";
+    setHTML("#c-recent", S.closed.length ? `<div class="tw"><table>
+      <thead><tr><th>時間</th><th>幣種</th><th>方向</th><th>策略</th>
+        <th class="n">盈虧</th><th class="n">R</th><th>出場原因</th></tr></thead>
+      <tbody>${S.closed.slice(0,8).map(c=>`<tr>
+        <td class="mono t3">${clock(c.closed)}</td>
+        <td class="mono" style="color:var(--tx)">${c.asset}</td>
+        <td class="${c.side==="LONG"?"up":"dn"}">${zhSide(c.side)}</td>
+        <td class="t3" style="font-size:11px">${c.strat==="PLAYBOOK"?"七關":"雙均線"} ${c.tf||""}</td>
+        <td class="n ${cls(c.pnl)}" style="font-weight:700">${sgn(c.pnl)}</td>
+        <td class="n ${cls(c.pnl)}">${c.r>=0?"+":""}${c.r.toFixed(2)}R</td>
+        <td class="t3" style="font-size:11.5px">${zhReason(c.reason)}</td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">還沒有完成的交易。</div>`);
+
+    // detail behind disclosure — only render when actually open
+    const gwrap = $("#c-gates");
+    if (gwrap && gwrap.closest("details").open){
+      gwrap.innerHTML = ASSETS.map(a=>{
+        const r = evalCache.playbook[a];
+        if (!r) return "";
+        const m = S.mkt[a];
+        return `<div style="border-bottom:1px solid var(--line)">
+          <div style="padding:9px 17px;background:var(--panel2);display:flex;gap:9px;align-items:center">
+            <span class="mono" style="font-weight:700">${a}</span>
+            <span class="t3" style="font-size:11.5px">七關進場流程 · 4H</span>
+            <span class="sp" style="margin-left:auto"></span>
+            <span class="chip ${r.ok?"g":"n"}">${r.gates.filter(g=>g.state==="pass").length}/7</span>
+          </div>
+          ${r.gates.map(g=>`<div class="gaterow ${g.state}">
+            <span class="no">第${g.n}關</span>
+            <span class="ttl">${GATE_ZH[g.n-1]}</span>
+            <span class="det">${esc(g.det)}</span>
+            <span class="st">${
+              g.state==="pass"?'<span class="chip g">通過</span>':
+              g.state==="fail"?'<span class="chip r">不通過</span>':
+              g.state==="wait"?'<span class="chip a">等待</span>':
+                               '<span class="chip n">—</span>'}</span>
+          </div>`).join("")}</div>`;
+      }).join("");
+    }
+
+    const lwrap = $("#c-logs");
+    if (lwrap && lwrap.closest("details").open){
+      lwrap.innerHTML = S.logs.slice(0,60).map(l=>`
+        <div class="logline"><span class="ts">${clock(l.t)}</span>
+          <span class="lv ${l.level}">${l.level}</span>
+          <span class="ms">${esc(l.msg)}</span></div>`).join("")
+        || `<div class="empty">沒有訊息。</div>`;
+    }
+  }
+};
+
+const GATE_ZH = ["結構過濾","趨勢成熟度","多週期對齊","進場區 HPCZ","風險計算","確認 K 棒","執行進場"];
+
+/** Render the real-market panel. Prices here are live exchange quotes and are
+ *  never mixed into the simulated account below. */
+function renderLive(){
+  const sc = $("#l-status"); if (!sc) return;
+  sc.innerHTML = liveStatusChip();
+  const src = $("#l-src");
+  if (src) src.textContent = (LIVE.status==="open" || LIVE.status==="polling")
+    ? `Binance · ${LIVE.source}` : "";
+
+  const has = ASSETS.some(a => LIVE.data[a]);
+  setHTML("#l-cards", !LIVE.on
+    ? `<div class="empty" style="grid-column:1/-1">即時行情已關閉。<br>
+        <span style="font-size:11.5px">開啟右上開關即可連線 Binance 公開行情。</span></div>`
+    : !has
+    ? `<div class="empty" style="grid-column:1/-1">${
+        LIVE.status==="error" ? "無法取得行情資料。" : "連線中,等待第一筆報價…"}</div>`
+    : ASSETS.map(a => {
+        const d = LIVE.data[a];
+        if (!d) return `<div class="lcard stale"><div class="top"><span class="sym">${a}</span></div>
+          <div class="px t4">—</div></div>`;
+        const dp = a==="BTC"?2:a==="ETH"?2:3;
+        const dir = d.px>d.prev ? "u" : d.px<d.prev ? "d" : "";
+        const rng = d.high-d.low;
+        const pos = rng>0 ? clamp((d.px-d.low)/rng,0,1) : 0.5;
+        const stale = Date.now()-d.t > 30000;
+        return `<div class="lcard ${stale?"stale":""}">
+          <div class="top"><span class="sym">${a}</span><span class="pair">${WS_SYM[a].toUpperCase()} 永續</span>
+            <span style="margin-left:auto" class="chip ${d.chg>=0?"g":"r"}">${pct(d.chg)}</span></div>
+          <div class="px ${dir}">$${fmt(d.px,dp)}</div>
+          <div class="sub">
+            <span>24h 量 ${fmt(d.vol,0)} ${a}</span>
+            <span>≈ $${(d.quote/1e6).toFixed(0)}M</span>
+          </div>
+          <div class="hl"><span>低 ${fmt(d.low,dp)}</span>
+            <span style="margin-left:auto">高 ${fmt(d.high,dp)}</span></div>
+          <div class="rng"><i style="left:${(pos*100).toFixed(1)}%"></i></div>
+          ${LIVE.hist[a].length>2 ? sparkline(LIVE.hist[a],240,32) : ""}
+        </div>`;
+      }).join(""));
+
+  setHTML("#l-note", LIVE.status==="error"
+    ? `<div class="note bad" style="margin-top:11px;font-size:11.5px">
+        <b>${esc(LIVE.err)}</b><br>
+        本頁只讀取公開行情,不會傳送任何個人資料。若你的網路或所在地區封鎖 Binance,
+        可關閉此功能,下方模擬交易不受影響。</div>`
+    : LIVE.on
+    ? `<div class="note info" style="margin-top:11px;font-size:11.5px">
+        以上為 <b>Binance 公開行情的真實價格</b>,僅供顯示。
+        下方的持倉、盈虧與資金曲線全部來自<b>本機模擬</b>,兩者不會互相影響——
+        模擬部位是以模擬價格成交的,若把真實報價混進去,損益數字就不成立了。</div>`
+    : "");
+}
+const tile = (k,v,sv,c="") =>
+  `<div class="tile"><div class="k">${k}</div><div class="v ${c}">${v}</div><div class="sv">${sv}</div></div>`;
+
+function renderHaltBar(sel){
+  const el = $(sel); if (!el) return;
+  // The console's status card already explains these states in plain language;
+  // only show the banner on the other pages to avoid saying it twice.
+  if (S.view === "console"){ el.innerHTML = ""; return; }
+  let msg = null;
+  if (S.killed) msg = ["已緊急停止","所有持倉已平倉,策略已關閉。"];
+  else if (S.breaker.daily)  msg = ["當日虧損達 2%","今日暫停開新倉。"];
+  else if (S.breaker.weekly) msg = ["當週虧損達 5%","本週暫停開新倉,請先檢討交易紀錄。"];
+  else if (S.breaker.streak) msg = ["連續 3 筆虧損",
+      `冷卻中 · 剩餘 ${Math.max(0,Math.ceil((S.breaker.cooldownUntil-Date.now())/1000))} 秒`];
+  else if (S.breaker.tradesToday >= CFG.breakers.maxTradesDay)
+    msg = ["今日已達交易上限", `已開 ${S.breaker.tradesToday}/${CFG.breakers.maxTradesDay} 筆。`];
+  el.innerHTML = msg
+    ? `<div class="halt"><span class="ttl">⛔ ${msg[0]}</span><span class="ds">${msg[1]}</span>
+       <span style="margin-left:auto"><button class="btn sm" data-action="reset-breakers">解除限制</button></span></div>`
+    : "";
+}
+
+function renderBreakers(sel){
+  const el = $(sel); if (!el) return;
+  const dPnl = (S.acct.equity - S.acct.dayAnchor)/S.acct.dayAnchor;
+  const wPnl = (S.acct.equity - S.acct.weekAnchor)/S.acct.weekAnchor;
+  const row = (label, cur, lim, trip, extra) => {
+    const use = clamp(Math.abs(Math.min(cur,0))/lim, 0, 1);
+    const col = trip ? "var(--dn)" : use>0.6 ? "var(--acc)" : "var(--up)";
+    return `<div style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;font-size:12px">
+        <span class="${trip?"dn":"t2"}">${label}</span>
+        <span class="mono ${trip?"dn":"t3"}" style="margin-left:auto;font-size:11.5px">${extra}</span>
+        <span class="chip ${trip?"r":"g"}">${trip?"TRIPPED":"OK"}</span>
+      </div>
+      <div class="bar"><i style="width:${(use*100).toFixed(0)}%;background:${col}"></i></div>
+    </div>`;
+  };
+  el.innerHTML =
+    row("當日虧損上限 2%", dPnl, CFG.breakers.daily, S.breaker.daily, `${pct(dPnl)} / -2.00%`) +
+    row("當週虧損上限 5%", wPnl, CFG.breakers.weekly, S.breaker.weekly, `${pct(wPnl)} / -5.00%`) +
+    row("連續虧損 3 筆", -S.breaker.streakCount/CFG.breakers.streak, 1, S.breaker.streak,
+        `${S.breaker.streakCount} / 3`) +
+    row("單日開倉上限 2 筆", -S.breaker.tradesToday/CFG.breakers.maxTradesDay, 1,
+        S.breaker.tradesToday>=CFG.breakers.maxTradesDay, `${S.breaker.tradesToday} / 2`) +
+    `<div class="note ${S.breaker.streak||S.breaker.daily||S.breaker.weekly?"bad":"info"}" style="margin-top:2px">
+      ${S.breaker.streak
+        ? `冷卻中 — 剩餘 ${Math.max(0,Math.ceil((S.breaker.cooldownUntil-Date.now())/1000))} 秒。`
+        : `每次報價都會檢查。觸發後<b>只停止開新倉</b>,既有持倉的止損與止盈仍然有效。`}
+    </div>`;
+}
+function calcSizing(){
+  const out = $("#rc-out"); if (!out) return;
+  const eq   = parseFloat($("#rc-eq").value)||0;
+  const rp   = (parseFloat($("#rc-risk").value)||0)/100;
+  const asset= $("#rc-asset").value;
+  const side = $("#rc-side").value;
+  const c    = CFG.assets[asset];
+  let entry  = parseFloat($("#rc-entry").value);
+  let a      = parseFloat($("#rc-atr").value);
+  const tfk = $("#rc-tf") ? $("#rc-tf").value : "h4";
+  const tfI = S.mkt[asset].tf && S.mkt[asset].tf[tfk];
+  if (!entry || !isFinite(entry)) entry = S.mkt[asset].last;
+  if (!a || !isFinite(a)) a = tfI ? tfI.atr : entry*0.01;
+
+  const slDist = CFG.slAtrMult * a;
+  const sl = side==="LONG" ? entry-slDist : entry+slDist;
+  const tp = side==="LONG" ? entry+slDist*CFG.minRR : entry-slDist*CFG.minRR;
+  const riskAmt = eq*rp;
+  const qty = Math.max(c.qstep, roundStep(riskAmt/slDist, c.qstep));
+  const notional = qty*entry;
+  const margin = notional/CFG.leverage;
+  const liq = liqPrice(entry, side);
+  const slPctMove = slDist/entry;
+  const slPctMargin = slPctMove*CFG.leverage;
+  const liqPctMove = Math.abs(liq-entry)/entry;
+  const safe = slPctMove < liqPctMove;
+  const util = margin/(eq||1);
+
+  out.innerHTML = `
+    <div class="kv"><span class="k">Stop distance (2×ATR ${TF[tfk].label})</span><span class="v">${fmt(slDist,c.dp)} · ${(slPctMove*100).toFixed(2)}%</span></div>
+    <div class="kv"><span class="k">Stop loss</span><span class="v dn">${fmt(sl,c.dp)}</span></div>
+    <div class="kv"><span class="k">Take profit (1:2)</span><span class="v up">${fmt(tp,c.dp)}</span></div>
+    <div class="kv"><span class="k">Risk amount</span><span class="v acc">${usd(riskAmt)}</span></div>
+    <div class="kv"><span class="k">Position size</span><span class="v" style="color:var(--acc)">${qty.toFixed(4)} ${asset}</span></div>
+    <div class="kv"><span class="k">Notional (20×)</span><span class="v">${usd(notional,0)}</span></div>
+    <div class="kv"><span class="k">Margin required</span><span class="v">${usd(margin)}</span></div>
+    <div class="kv"><span class="k">Margin utilisation</span><span class="v ${util>CFG.maxMarginUse?"dn":"up"}">${(util*100).toFixed(1)}%</span></div>
+    <div class="kv"><span class="k">Est. liquidation</span><span class="v dn">${fmt(liq,c.dp)} · ${(liqPctMove*100).toFixed(2)}%</span></div>
+    <div class="kv"><span class="k">SL as % of margin</span><span class="v ${slPctMargin>0.6?"dn":"acc"}">${(slPctMargin*100).toFixed(1)}%</span></div>
+    <div class="note ${safe?"good":"bad"}" style="margin-top:10px;font-size:11.5px">
+      ${safe
+        ? `Stop sits <b>inside</b> the liquidation band (${(slPctMove*100).toFixed(2)}% vs ${(liqPctMove*100).toFixed(2)}%).
+           A full stop-out costs ${usd(riskAmt)} — <b>${(slPctMargin*100).toFixed(0)}% of the position's margin</b>,
+           but only ${(rp*100).toFixed(1)}% of the account. That asymmetry is the entire point of the sizing rule.`
+        : `<b>Rejected.</b> The 2×ATR stop (${(slPctMove*100).toFixed(2)}%) is wider than the liquidation
+           distance (${(liqPctMove*100).toFixed(2)}%) at 20×. You would be liquidated before your stop fills.
+           Reduce leverage or skip this setup — do not shrink the stop.`}
+    </div>`;
+}
+
+/* ------------------------------ BACKTEST ------------------------ */
+function logCurve(vals, w=900, h=230){
+  if (!vals || vals.length<2)
+    return `<div class="empty"><div class="big">◠</div>沒有資金曲線資料。</div>`;
+  const pad=26, rp=62;
+  const lo=Math.max(1,Math.min(...vals)), hi=Math.max(...vals);
+  const lg=v=>Math.log(Math.max(v,1));
+  const L=lg(lo), H=lg(hi), R=(H-L)||1;
+  const X=i=>pad+(i/(vals.length-1))*(w-pad-rp);
+  const Y=v=>h-pad-((lg(v)-L)/R)*(h-pad*2);
+  const step=Math.max(1,Math.floor(vals.length/900));
+  const pts=[]; for(let i=0;i<vals.length;i+=step) pts.push(`${X(i).toFixed(1)},${Y(vals[i]).toFixed(1)}`);
+  pts.push(`${X(vals.length-1).toFixed(1)},${Y(vals[vals.length-1]).toFixed(1)}`);
+  const up=vals[vals.length-1]>=vals[0], c=up?"var(--up)":"var(--dn)";
+  const grid=[0,.25,.5,.75,1].map(f=>{
+    const y=h-pad-f*(h-pad*2), val=Math.exp(L+f*R);
+    return `<line x1="${pad}" y1="${y}" x2="${w-rp}" y2="${y}" stroke="var(--line)" opacity=".5"/>
+      <text x="${w-rp+6}" y="${y+3.5}" fill="var(--tx4)" font-size="9.5" font-family="var(--mono)">$${fmt(val,0)}</text>`;
+  }).join("");
+  // running peak → drawdown shading
+  let pk=vals[0]; const dd=[];
+  for(let i=0;i<vals.length;i+=step){ pk=Math.max(pk,vals[i]); dd.push(`${X(i).toFixed(1)},${Y(pk).toFixed(1)}`); }
+  const yrTicks=[]; const yrs=BT.res?BT.res.cfg.years:10;
+  for(let y=0;y<=yrs;y++){
+    const i=Math.min(vals.length-1,Math.round(y*365));
+    yrTicks.push(`<text x="${X(i)}" y="${h-6}" fill="var(--tx4)" font-size="9" font-family="var(--mono)" text-anchor="middle">Y${y}</text>`);
+  }
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px;display:block">
+    ${grid}
+    <polyline points="${dd.join(" ")}" fill="none" stroke="var(--tx4)" stroke-width="1"
+      stroke-dasharray="3 3" opacity=".55"/>
+    <polyline points="${pts.join(" ")}" fill="none" stroke="${c}" stroke-width="1.7" stroke-linejoin="round"/>
+    ${yrTicks.join("")}
+    <text x="${pad}" y="14" fill="var(--tx4)" font-size="9.5" font-family="var(--mono)">對數座標 · 虛線為歷史高點</text>
+  </svg>`;
+}
+
+function monthlyHeat(m){
+  if (!m || !m.length) return `<div class="empty">沒有月度資料。</div>`;
+  const mx = Math.max(0.001, ...m.map(v=>Math.abs(v)));
+  const cell = v => {
+    const t = Math.min(1, Math.abs(v)/mx);
+    const bg = v>=0 ? `rgba(38,166,154,${(0.12+t*0.62).toFixed(3)})`
+                    : `rgba(239,83,80,${(0.12+t*0.62).toFixed(3)})`;
+    return `<div title="${(v*100).toFixed(2)}%" style="background:${bg};border-radius:3px;
+      padding:5px 2px;text-align:center;font-family:var(--mono);font-size:9px;
+      color:${Math.abs(t)>0.55?"var(--tx)":"var(--tx3)"}">${(v*100).toFixed(0)}</div>`;
+  };
+  const rows=[];
+  for (let y=0; y*12<m.length; y++){
+    const slice = m.slice(y*12,(y+1)*12);
+    const yr = slice.reduce((a,b)=>a*(1+b),1)-1;
+    rows.push(`<div style="display:grid;grid-template-columns:34px repeat(12,1fr) 54px;gap:3px;margin-bottom:3px">
+      <div class="mono t4" style="font-size:9.5px;display:flex;align-items:center">Y${y+1}</div>
+      ${Array.from({length:12},(_,k)=>slice[k]!==undefined?cell(slice[k]):`<div></div>`).join("")}
+      <div class="mono ${cls(yr)}" style="font-size:9.5px;display:flex;align-items:center;justify-content:flex-end">${(yr*100).toFixed(1)}%</div>
+    </div>`);
+  }
+  return `<div style="display:grid;grid-template-columns:34px repeat(12,1fr) 54px;gap:3px;margin-bottom:5px">
+      <div></div>${["1","2","3","4","5","6","7","8","9","10","11","12"].map(x=>
+        `<div class="mono t4" style="font-size:8.5px;text-align:center">${x}</div>`).join("")}
+      <div class="mono t4" style="font-size:8.5px;text-align:right">YEAR</div>
+    </div>${rows.join("")}`;
+}
+
+V.backtest = {
+  mount(){
+    const c = BT.cfg;
+    return `
+    <div class="pgh">
+      <h1>回測</h1>
+      <div class="d">用歷史長度驗證兩套策略與風控機制</div>
+      <div class="sp" id="bt-actions"></div>
+    </div>
+
+    <div class="note bad" style="margin-bottom:14px">
+      <div class="h">⚠ A profit here is close to circular — read this before believing any number</div>
+      The series is produced by a local model, <b>not real BTC/ETH/SOL history</b>. That model
+      generates <b>persistent trend regimes by construction</b> — drift holds one direction for
+      hundreds of bars at a time. Trend-following strategies profit on that almost by definition,
+      so a positive curve below mostly confirms <b>the generator trends</b>, not that the strategy
+      has edge.
+      <br><br>
+      What this backtest <i>does</i> validate: that entries, 20× sizing, stops, circuit breakers,
+      fees and the equity ledger all behave correctly over hundreds of thousands of bars.
+      What it cannot tell you: whether any of this makes money on real markets. Real price series
+      break trend without warning, gap through stops, and charge funding on every position.
+      Re-run the identical configuration under <b>Choppy</b> and compare: in our 3-year check the
+      same system fell from ~24% CAGR / 1.28 Sharpe to <b>~6% CAGR / 0.42 Sharpe</b> with breaker
+      trips up by half. It stayed positive only because even the "choppy" setting still spends about
+      half its time trending. <b>That gap between two runs of the same code is the honest measure of
+      how much of any result belongs to the model rather than the method.</b>
+    </div>
+
+    <div class="grid" style="grid-template-columns:300px 1fr;gap:12px;margin-bottom:12px">
+      <div class="panel">
+        <div class="ph"><span class="t">設定</span></div>
+        <div class="pb">
+          <div class="grid g2" style="gap:9px">
+            <div class="fld" style="margin:0"><label class="fl">年數</label>
+              <input type="number" id="bt-years" min="1" max="20" value="${c.years}"></div>
+            <div class="fld" style="margin:0"><label class="fl">起始資金</label>
+              <input type="number" id="bt-eq" min="100" value="${c.equity}"></div>
+          </div>
+          <div class="fld"><label class="fl">市場情境</label>
+            <select id="bt-regime">${Object.entries(BT_REGIMES).map(([k,v])=>
+              `<option value="${k}" ${k===c.regime?"selected":""}>${v.label}</option>`).join("")}</select></div>
+          <div class="note info" style="margin-top:2px;font-size:11px">
+            風險規則沿用實盤引擎:單筆 1%、止損 2×ATR、最低盈虧比 1:2、20× 逐倉、
+            單邊手續費 ${(CFG.takerFee*1e4).toFixed(1)} bps。
+          </div>
+          <div id="bt-run" style="margin-top:10px"></div>
+
+          <details class="more" style="margin-top:10px">
+            <summary>進階選項</summary>
+            <div class="inner">
+              <div class="grid g2" style="gap:9px">
+                <div class="fld" style="margin:0"><label class="fl">波動倍數</label>
+                  <input type="number" id="bt-vol" step="0.1" min="0.3" max="3" value="${c.volScale}"></div>
+                <div class="fld" style="margin:0"><label class="fl">隨機種子</label>
+                  <input type="text" id="bt-seed" placeholder="隨機" value="${esc(c.seed)}"></div>
+              </div>
+              <div class="swrow"><div class="txt"><div class="a">七關趨勢法 · 4H</div></div>
+                <label class="sw"><input type="checkbox" id="bt-pb" ${c.playbook?"checked":""}><span class="tr"></span></label></div>
+              <div class="swrow"><div class="txt"><div class="a">雙均線 · 15m</div></div>
+                <label class="sw"><input type="checkbox" id="bt-m15" ${c.m15?"checked":""}><span class="tr"></span></label></div>
+              <div class="swrow"><div class="txt"><div class="a">雙均線 · 4H</div></div>
+                <label class="sw"><input type="checkbox" id="bt-h4" ${c.h4?"checked":""}><span class="tr"></span></label></div>
+              <div class="swrow"><div class="txt"><div class="a">風控自動停止</div>
+                <div class="b">日虧 2% · 週虧 5% · 連虧 3 筆冷卻</div></div>
+                <label class="sw"><input type="checkbox" id="bt-brk" ${c.breakers?"checked":""}><span class="tr"></span></label></div>
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <div>
+        <div class="grid g4" style="margin-bottom:12px" id="bt-kpi"></div>
+        <div class="panel">
+          <div class="ph"><span class="t">資金曲線</span><span class="s" id="bt-curve-s">—</span></div>
+          <div class="pb" id="bt-curve"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="bt-detail"></div>
+    ${DISCLAIMER}`;
+  },
+
+  progress(){
+    const el = $("#bt-run"); if (!el) return;
+    if (BT.running){
+      el.innerHTML = `
+        <div class="bar" style="height:7px"><i style="width:${(BT.pct*100).toFixed(1)}%;background:var(--acc)"></i></div>
+        <div class="mono t3" style="font-size:10.5px;margin-top:6px">${esc(BT.phase)} · ${(BT.pct*100).toFixed(1)}%</div>
+        <button class="btn sm red" style="width:100%;justify-content:center;margin-top:8px"
+          data-action="bt-cancel">取消</button>`;
+    } else {
+      el.innerHTML = `<button class="btn pri" style="width:100%;justify-content:center"
+        data-action="bt-run">▶ 執行 ${BT.cfg.years} 年回測</button>
+        ${BT.res?`<div class="mono t4" style="font-size:10px;margin-top:7px;text-align:center">
+          seed ${esc(BT.res.seed)} · ${BT.res.cfg.years}y · ${BT_REGIMES[BT.res.cfg.regime].label}</div>`:""}`;
+    }
+  },
+
+  refresh(){
+    this.progress();
+    const acts = $("#bt-actions");
+    if (acts) acts.innerHTML = BT.res && !BT.running
+      ? `<button class="btn sm" data-action="bt-export">匯出交易 .csv</button>` : "";
+
+    const r = BT.res;
+    if (!r){
+      setHTML("#bt-kpi", ["總報酬","年化報酬","最大回撤","交易筆數"]
+        .map(k=>tile(k,"—","尚未執行","t3")).join(""));
+      setHTML("#bt-curve", `<div class="empty"><div class="big">▤</div>
+        設定後按下執行。<br><span style="font-size:11.5px">
+        10 年的 15m 資料每個幣種約 35 萬根 K 棒,大約需要 1～2 分鐘。</span></div>`);
+      setHTML("#bt-detail","");
+      return;
+    }
+
+    setHTML("#bt-kpi", [
+      tile("總報酬", pct(r.totalReturn), `${usd(r.start,0)} → ${usd(r.end,0)}`, cls(r.totalReturn)),
+      tile("年化報酬", pct(r.cagr), `${r.years.toFixed(1)} 年`, cls(r.cagr)),
+      tile("最大回撤", pct(r.maxDD), `水下 ${r.maxDDDays} 天`, r.maxDD<-0.2?"dn":"acc"),
+      tile("交易筆數", String(r.trades), `每週 ${r.tradesPerWeek.toFixed(2)} 筆`, "t3"),
+    ].join(""));
+
+    const s = $("#bt-curve-s");
+    if (s) s.textContent = `${r.cfg.years}y · ${BT_REGIMES[r.cfg.regime].label} · seed ${r.seed}`;
+    setHTML("#bt-curve", logCurve(r.curve));
+
+    const row = (k,v,c2="") => `<div class="kv"><span class="k">${k}</span><span class="v ${c2}">${v}</span></div>`;
+    const brk = (cnt,pnl) => Object.keys(cnt).length
+      ? Object.keys(cnt).map(k=>row(`${k} · ${cnt[k]} 筆`, sgn(pnl[k]||0), cls(pnl[k]||0))).join("")
+      : `<div class="t4" style="font-size:12px;padding:6px 0">沒有交易。</div>`;
+
+    setHTML("#bt-detail", `
+    <div class="grid g4" style="margin-bottom:12px">
+      <div class="panel"><div class="ph"><span class="t">績效</span></div><div class="pb">
+        ${row("淨利", sgn(r.netProfit), cls(r.netProfit))}
+        ${row("獲利因子", isFinite(r.profitFactor)?r.profitFactor.toFixed(2):"∞", r.profitFactor>=1?"up":"dn")}
+        ${row("期望值", (r.expectancyR>=0?"+":"")+r.expectancyR.toFixed(3)+"R", cls(r.expectancyR))}
+        ${row("夏普值(年化)", r.sharpe.toFixed(2), r.sharpe>0?"up":"dn")}
+        ${row("索提諾值(年化)", r.sortino.toFixed(2), r.sortino>0?"up":"dn")}
+        ${row("手續費", usd(r.fees), "t3")}
+      </div></div>
+      <div class="panel"><div class="ph"><span class="t">交易統計</span></div><div class="pb">
+        ${row("勝率", (r.winRate*100).toFixed(1)+"%", r.winRate>=0.4?"up":"acc")}
+        ${row("獲利 / 虧損 筆數", `${r.wins} / ${r.losses}`)}
+        ${row("平均獲利", "+"+r.avgWinR.toFixed(2)+"R", "up")}
+        ${row("平均虧損", r.avgLossR.toFixed(2)+"R", "dn")}
+        ${row("最長連虧", String(r.worstStreak), r.worstStreak>=6?"dn":"")}
+        ${row("最長連勝", String(r.bestStreak), "up")}
+      </div></div>
+      <div class="panel"><div class="ph"><span class="t">風險</span></div><div class="pb">
+        ${row("最大回撤", pct(r.maxDD), "dn")}
+        ${row("水下天數", r.maxDDDays+" 天", "t3")}
+        ${row("強制平倉", String(r.liquidations), r.liquidations?"dn":"up")}
+        ${row("風控觸發", String(r.breakerTrips), r.breakerTrips?"acc":"up")}
+        ${row("持倉時間占比", (r.exposure*100).toFixed(1)+"%", "t3")}
+        ${row("槓桿", "20× 逐倉", "acc")}
+      </div></div>
+      <div class="panel"><div class="ph"><span class="t">依策略 / 週期</span></div><div class="pb">
+        ${brk(r.cntByStrat, r.pnlByStrat)}
+        <div style="height:7px"></div>
+        ${brk(r.cntByTF, r.pnlByTF)}
+      </div></div>
+    </div>
+
+    <div class="grid" style="grid-template-columns:1.35fr 1fr;gap:12px">
+      <div class="panel">
+        <div class="ph"><span class="t">月報酬</span><span class="s">每 30 天 %</span></div>
+        <div class="pb">${monthlyHeat(r.monthly)}</div>
+      </div>
+      <div class="panel">
+        <div class="ph"><span class="t">依幣種</span></div>
+        <div class="pb">${brk(r.cntByAsset, r.pnlByAsset)}
+          <div class="note ${r.expectancyR>0?"good":"warn"}" style="margin-top:11px;font-size:11.5px">
+            ${(() => {
+              const se = 1/Math.sqrt(Math.max(1,r.trades));
+              const t = Math.abs(r.expectancyR)/se;
+              const sig = t >= 2;
+              return r.expectancyR > 0
+              ? `Expectancy <b>+${r.expectancyR.toFixed(3)}R</b> over ${r.trades} trades.
+                 Per-trade dispersion is about 1R, so the standard error is ~${se.toFixed(3)}R,
+                 putting this ${t.toFixed(1)}σ from zero — <b>${sig?"statistically distinguishable"
+                 :"NOT distinguishable"}</b> from noise on this sample.
+                 ${sig?`But significance here is not evidence of edge: the generator trends by
+                 construction, so a trend system should win. Re-run under
+                 <b>Choppy</b> to see how much survives.`:`Treat it as noise.`}`
+              : `Expectancy <b>${r.expectancyR.toFixed(3)}R</b> — the system lost money over
+                 ${r.trades} trades (${t.toFixed(1)}σ from zero). Whipsaw plus the
+                 ${(CFG.takerFee*1e4).toFixed(1)} bps round-turn fee outran the winners.
+                 Check that the risk framework still held: drawdown bounded and zero liquidations
+                 is the machinery working correctly even while the strategy loses.`;
+            })()}
+          </div>
+        </div>
+      </div>
+    </div>`);
+  }
+};
+/* ------------------------------ 設定 SETUP --------------------- */
+/* Exchange keys + strategy on/off + risk rules on one page. The tunable
+   internals (MA periods, sizing calculator, correlation) sit behind
+   disclosures so the common path stays short. */
+V.setup = {
+  mount(){
+    const D = S.strat.dualma;
+    const exRow = (id) => {
+      const e = S.ex[id], isBg = id === "bitget";
+      return `<div class="exsimple">
+        <span class="dot" style="background:${e.on?"var(--up)":"var(--tx4)"}"></span>
+        <span class="nm">${id==="binance"?"Binance":"Bitget"}<br>
+          <span class="t4" style="font-size:10.5px;font-weight:400">合約 Futures</span></span>
+        <span class="fields">
+          <input type="text" placeholder="API Key" value="${esc(e.key)}"
+            data-action="ex-field" data-x="${id}" data-f="key">
+          <input type="password" placeholder="Secret Key" value="${esc(e.secret)}"
+            data-action="ex-field" data-x="${id}" data-f="secret">
+          ${isBg?`<input type="password" placeholder="Passphrase" value="${esc(e.pass)}"
+            data-action="ex-field" data-x="${id}" data-f="pass">`:""}
+        </span>
+        <button class="btn sm" data-action="ex-test" data-x="${id}">測試</button>
+        <span id="ex-res-${id}" style="min-width:78px;font-size:11px" class="mono t3">${
+          e.on?`<span class="up">${e.lat} ms</span>`:e.lat?`<span class="acc">${e.lat} ms</span>`:"—"}</span>
+        <label class="sw"><input type="checkbox" data-action="ex-toggle" data-x="${id}"
+          ${e.on?"checked":""}><span class="tr"></span></label>
+      </div>`;
+    };
+
+    return `
+    <div class="wrapn">
+      <div class="pgh"><h1>設定</h1>
+        <div class="d">連線、策略與風險規則</div>
+        <div class="sp"><div class="seg">
+          <button class="${S.testnet?"act grn":""}" data-action="net" data-v="test">測試網</button>
+          <button class="${!S.testnet?"act warn":""}" data-action="net" data-v="main">主網</button>
+        </div></div>
+      </div>
+
+      <!-- 1. 交易所 -->
+      <div class="block">
+        <div class="bh"><span class="n">1 · 交易所連線</span>
+          <span class="d">填入金鑰 → 測試 → 開啟開關</span></div>
+        <div class="panel"><div class="pb tight">
+          ${exRow("binance")}${exRow("bitget")}
+        </div></div>
+        <div class="note info" style="margin-top:9px;font-size:11.5px">
+          此頁面不會發送任何網路請求,連線測試與延遲均為模擬,金鑰不會離開瀏覽器也不會被儲存。
+          真實下單必須由<b>後端伺服器簽章</b>——瀏覽器無法安全保管交易所密鑰,
+          且 Binance 與 Bitget 都會以 CORS 阻擋來自瀏覽器的簽章請求。
+        </div>
+      </div>
+
+      <!-- 2. 策略 -->
+      <div class="block">
+        <div class="bh"><span class="n">2 · 策略</span>
+          <span class="d">可單獨或同時執行</span></div>
+        <div class="panel"><div class="pb tight">
+          <div class="stratrow">
+            <div class="info">
+              <div class="a">七關趨勢交易法 <span class="chip v">4H</span></div>
+              <div class="b">依交易操作手冊的七道關卡逐關過濾,任何一關不過就跳過。
+                方向看週線,空間看日線,執行在 4H。進場次數很少,這是刻意的。</div>
+            </div>
+            <div class="pick">${ASSETS.map(a=>`<button class="btn sm ${S.strat.playbook.alloc[a]?"grn":""}"
+              data-action="alloc" data-s="playbook" data-a="${a}">${a}</button>`).join("")}</div>
+            <label class="sw"><input type="checkbox" data-action="strat-toggle" data-s="playbook"
+              ${S.strat.playbook.on?"checked":""}><span class="tr"></span></label>
+          </div>
+          <div class="stratrow">
+            <div class="info">
+              <div class="a">雙均線交易系統
+                ${DUALMA_TFS.map(k=>`<span class="chip ${k==="m15"?"b":"v"}">${TF[k].label}</span>`).join("")}</div>
+              <div class="b">EMA${D.fast} 與 EMA${D.slow} 金叉做多、死叉做空,
+                另以成交量、ADX 與結構過濾盤整假訊號。15m 與 4H 為兩條獨立訊號線。</div>
+            </div>
+            <div class="pick">
+              ${ASSETS.map(a=>`<button class="btn sm ${S.strat.dualma.alloc[a]?"grn":""}"
+                data-action="alloc" data-s="dualma" data-a="${a}">${a}</button>`).join("")}
+              ${DUALMA_TFS.map(k=>`<button class="btn sm ${D.tf[k]?"pri":""}"
+                data-action="dm-tf" data-k="${k}">${TF[k].label}</button>`).join("")}
+            </div>
+            <label class="sw"><input type="checkbox" data-action="strat-toggle" data-s="dualma"
+              ${S.strat.dualma.on?"checked":""}><span class="tr"></span></label>
+          </div>
+        </div></div>
+      </div>
+
+      <!-- 3. 風險 -->
+      <div class="block">
+        <div class="bh"><span class="n">3 · 風險規則</span>
+          <span class="d">已鎖定,不可在盤中調整</span></div>
+        <div class="rulebox" style="margin-bottom:10px">
+          <div><div class="k">槓桿</div><div class="v">20× 逐倉</div></div>
+          <div><div class="k">單筆風險</div><div class="v">≤ 1%</div></div>
+          <div><div class="k">止損距離</div><div class="v">≥ 2 × ATR</div></div>
+          <div><div class="k">最低盈虧比</div><div class="v">1 : 2</div></div>
+          <div><div class="k">單日上限</div><div class="v">2 筆</div></div>
+        </div>
+        <div class="panel">
+          <div class="ph"><span class="t">自動停止條件</span>
+            <span class="s">觸發後暫停開新倉,持倉仍保留止損止盈</span></div>
+          <div class="pb" id="su-brk"></div>
+        </div>
+      </div>
+
+      <div class="note bad" style="margin-bottom:14px">
+        <div class="h">⚠ 20× 槓桿的真實含義</div>
+        逆向約 <b>5% 就會強制平倉</b>。1% 風險與 2×ATR 止損正是為了讓止損遠早於強平觸發,
+        但跳空、資金費率或交易所故障仍可能直接穿過止損。
+        槓桿不會創造優勢,只會放大你已有的優勢或劣勢。
+      </div>
+
+      <details class="more">
+        <summary>進階 — 雙均線參數</summary>
+        <div class="inner">
+          <div class="grid g4" style="gap:10px">
+            <div class="fld" style="margin:0"><label class="fl">快線 EMA</label>
+              <input type="number" min="2" max="60" value="${D.fast}" data-action="ma" data-f="fast"></div>
+            <div class="fld" style="margin:0"><label class="fl">慢線 EMA</label>
+              <input type="number" min="5" max="200" value="${D.slow}" data-action="ma" data-f="slow"></div>
+            <div class="fld" style="margin:0"><label class="fl">ADX 最低值</label>
+              <input type="number" min="0" max="60" value="${D.adxMin}" data-action="ma" data-f="adxMin"></div>
+            <div class="fld" style="margin:0"><label class="fl">成交量倍數</label>
+              <input type="number" min="0.5" max="5" step="0.1" value="${D.volMult}" data-action="ma" data-f="volMult"></div>
+          </div>
+          <div class="swrow" style="border-top:1px solid var(--line);margin-top:6px">
+            <div class="txt"><div class="a">結構過濾</div>
+              <div class="b">要求同週期結構方向與交叉方向一致,可減少盤整假訊號</div></div>
+            <label class="sw"><input type="checkbox" data-action="ma-bool" data-f="useTrendFilter"
+              ${D.useTrendFilter?"checked":""}><span class="tr"></span></label>
+          </div>
+        </div>
+      </details>
+
+      <details class="more">
+        <summary>進階 — 倉位計算機</summary>
+        <div class="inner">
+          <div class="grid g4" style="gap:9px">
+            <div class="fld" style="margin:0"><label class="fl">帳戶權益</label>
+              <input type="number" id="rc-eq" value="${S.acct.equity.toFixed(2)}" data-action="calc"></div>
+            <div class="fld" style="margin:0"><label class="fl">風險 %</label>
+              <input type="number" id="rc-risk" value="1" step="0.1" data-action="calc"></div>
+            <div class="fld" style="margin:0"><label class="fl">幣種</label>
+              <select id="rc-asset" data-action="calc">${ASSETS.map(a=>`<option>${a}</option>`).join("")}</select></div>
+            <div class="fld" style="margin:0"><label class="fl">方向</label>
+              <select id="rc-side" data-action="calc"><option value="LONG">做多</option><option value="SHORT">做空</option></select></div>
+            <div class="fld" style="margin:0"><label class="fl">進場價</label>
+              <input type="number" id="rc-entry" step="any" data-action="calc"></div>
+            <div class="fld" style="margin:0"><label class="fl">ATR(14)</label>
+              <input type="number" id="rc-atr" step="any" data-action="calc"></div>
+            <div class="fld" style="margin:0;grid-column:span 2"><label class="fl">ATR 週期</label>
+              <select id="rc-tf" data-action="calc">
+                ${["m15","h1","h4","d1"].map(k=>`<option value="${k}" ${k==="h4"?"selected":""}>${TF[k].label}</option>`).join("")}
+              </select></div>
+          </div>
+          <button class="btn sm" style="width:100%;justify-content:center;margin-top:4px"
+            data-action="calc-sync">↻ 帶入目前價格與 ATR</button>
+          <div id="rc-out" style="margin-top:11px"></div>
+        </div>
+      </details>
+
+      <details class="more">
+        <summary>進階 — 持倉曝險與相關性</summary>
+        <div class="inner" id="su-expo"></div>
+      </details>
+
+      ${DISCLAIMER}
+    </div>`;
+  },
+
+  refresh(){
+    renderBreakers("#su-brk");
+    const w = $("#su-expo");
+    if (w && w.closest("details").open){
+      const longs = S.positions.filter(p=>p.side==="LONG").length;
+      const shorts = S.positions.filter(p=>p.side==="SHORT").length;
+      const clustered = longs>1 || shorts>1;
+      const marginUsed = S.positions.reduce((s,p)=>s+p.margin,0);
+      w.innerHTML = `
+        <div class="kv"><span class="k">保證金使用</span>
+          <span class="v ${marginUsed/(S.acct.equity||1)>CFG.maxMarginUse?"dn":"up"}">
+          ${usd(marginUsed)} · ${((marginUsed/(S.acct.equity||1))*100).toFixed(1)}%（上限 80%）</span></div>
+        <div class="kv"><span class="k">做多 / 做空 筆數</span>
+          <span class="v ${clustered?"dn":""}">${longs} / ${shorts}</span></div>
+        <div class="kv"><span class="k">實際風險倍數</span>
+          <span class="v ${clustered?"dn":"up"}">${Math.max(longs,shorts)||0}× 單筆</span></div>
+        <div class="note ${clustered?"warn":"good"}" style="margin-top:10px;font-size:11.5px">
+          ${clustered
+            ? `<b>偵測到同向重複曝險。</b>BTC、ETH、SOL 高度連動,
+               ${Math.max(longs,shorts)} 筆同向各 1%,實際上等於一筆
+               <b>${Math.max(longs,shorts)}%</b> 的單一賭注,而非分散。`
+            : `目前沒有同向重複曝險。加密貨幣主流幣連動性高,同時做多多個幣種應視為同一筆放大的部位。`}
+        </div>`;
+    }
+    if ($("#rc-out") && $("#rc-out").closest("details").open) calcSizing();
+  }
+};
+/* ---------------------------------------------------------------- *
+ * 14. RENDER PLUMBING
+ * ---------------------------------------------------------------- */
+function setHTML(sel, html){ const el = $(sel); if (el && el.innerHTML !== html) el.innerHTML = html; }
+
+function switchView(v){
+  if (!V[v]) v = "console";
+  S.view = v;
+  $$(".navitem").forEach(n => n.classList.toggle("act", n.dataset.view === v));
+  $("#view").innerHTML = V[v].mount();
+  if (v === "setup") syncCalc();
+  V[v].refresh();
+  // a disclosure only renders its contents while open — repaint on toggle
+  $$("#view details.more").forEach(d =>
+    d.addEventListener("toggle", () => { if (V[S.view]) V[S.view].refresh(); }));
+}
+
+const ENGINE_ZH = { IDLE:"閒置", RUNNING:"執行中", HALTED:"已暫停", KILLED:"已停止" };
+
+function paintHeader(){
+  const total = S.acct.equity - S.acct.start;
+  $("#h-equity").textContent = usd(S.acct.equity);
+  const p = $("#h-pnl"); p.textContent = sgn(total); p.className = "v " + cls(total);
+
+  // one connection indicator instead of one chip per venue
+  const on = EXCHANGES.filter(e => S.ex[e].on);
+  const chip = $("#chip-conn");
+  chip.classList.toggle("on", on.length > 0);
+  chip.classList.toggle("off", on.length === 0);
+  $("#conn-lbl").textContent = on.length ? `已連線 ${on.length}/2` : "未連線";
+  $("#conn-sub").textContent = on.length
+    ? on.map(e => `${e==="binance"?"Binance":"Bitget"} ${S.ex[e].lat}ms`).join(" · ")
+    : "前往設定";
+
+  const kb = $("#killbtn");
+  kb.classList.toggle("armed", S.killed);
+  kb.textContent = S.killed ? "◉ 已停止 — 重新啟動" : "■ 緊急停止";
+
+  const eng = $("#f-engine");
+  eng.textContent = ENGINE_ZH[S.engine] || S.engine;
+  eng.className = S.engine==="RUNNING" ? "up"
+                : (S.engine==="HALTED"||S.engine==="KILLED") ? "dn" : "t3";
+  $("#f-mode").textContent = S.testnet ? "測試網" : "主網";
+  $("#f-mode").className = S.testnet ? "up" : "dn";
+  $("#f-up").textContent = hhmmss(Date.now() - S.booted);
+
+  const nov = $("#nb-ov");
+  nov.textContent = S.positions.length ? `${S.positions.length} 持倉` : (ENGINE_ZH[S.engine]||S.engine);
+  nov.className = "bdg " + (S.positions.length ? "hot"
+    : S.engine==="RUNNING" ? "grn"
+    : (S.engine==="HALTED"||S.engine==="KILLED") ? "red" : "");
+
+  const nbt = $("#nb-bt");
+  if (nbt){
+    nbt.textContent = BT.running ? (BT.pct*100).toFixed(0)+"%" : BT.res ? pct(BT.res.totalReturn,0) : "—";
+    nbt.className = "bdg " + (BT.running ? "hot" : BT.res ? (BT.res.totalReturn>=0?"grn":"red") : "");
+  }
+  const nex = $("#nb-ex");
+  nex.textContent = on.length + "/2";
+  nex.className = "bdg " + (on.length ? "grn" : "");
+}
+
+/* ---------------------------------------------------------------- *
+ * 15. MODAL
+ * ---------------------------------------------------------------- */
+function confirmModal(title, body, okLabel, onOk, kind="red"){
+  const root = $("#modal-root");
+  root.innerHTML = `<div class="mask" data-action="modal-bg">
+    <div class="modal">
+      <div class="mh">${title}</div>
+      <div class="mb">${body}</div>
+      <div class="mf">
+        <button class="btn" data-action="modal-cancel">取消</button>
+        <button class="btn ${kind}" data-action="modal-ok">${okLabel}</button>
+      </div>
+    </div></div>`;
+  root._ok = onOk;
+}
+function closeModal(){ $("#modal-root").innerHTML = ""; $("#modal-root")._ok = null; }
+
+/* ---------------------------------------------------------------- *
+ * 16. EVENT DELEGATION
+ * ---------------------------------------------------------------- */
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-action]");
+  if (!t) return;
+  const A = t.dataset.action;
+
+  switch (A) {
+    case "nav": switchView(t.dataset.view); break;
+
+    case "kill":
+      if (S.killed){
+        confirmModal("重新啟動交易引擎",
+          `解除緊急停止,策略將可以重新開倉。<br><br>
+           注意:這<b>不會</b>解除風控的自動停止條件。`,
+          "重新啟動", () => {
+            S.killed = false; S.engine = "IDLE";
+            log("WARN","Kill switch released — engine re-armed.");
+            toast("<b>引擎已重新啟動。</b>","a"); closeModal(); repaint();
+          }, "grn");
+      } else {
+        confirmModal("⛔ 緊急停止",
+          `將立刻<b>以市價平掉全部 ${S.positions.length} 筆持倉</b>、取消所有掛單並停止引擎。<br><br>
+           目前未實現盈虧 <b class="${cls(unrealized())}">${sgn(unrealized())}</b> 會即時結算。`,
+          "全部停止", () => { engageKill(); closeModal(); repaint(); });
+      }
+      break;
+
+    case "close-all":
+      if (!S.positions.length){ toast("目前沒有持倉。","a"); break; }
+      confirmModal("全部平倉",
+        `以目前市價平掉全部 <b>${S.positions.length}</b> 筆持倉?<br><br>
+         未實現盈虧:<b class="${cls(unrealized())}">${sgn(unrealized())}</b>`,
+        "全部平倉", () => {
+          const n = S.positions.length;
+          [...S.positions].forEach(p => closePosition(p, "MANUAL CLOSE"));
+          log("WARN", `Manual flatten — ${n} position(s) closed at market.`);
+          closeModal(); repaint();
+        });
+      break;
+
+    case "close-one": {
+      const p = S.positions.find(x=>x.id===t.dataset.id);
+      if (p){ closePosition(p, "MANUAL CLOSE"); repaint(); }
+      break;
+    }
+
+    case "cancel-pending": {
+      const n = S.orders.filter(o=>o.status==="PENDING").length;
+      S.orders = S.orders.filter(o=>o.status!=="PENDING");
+      log("INFO", `Cancelled ${n} pending order(s).`);
+      toast(n?`已取消 <b>${n}</b> 筆掛單。`:"沒有待取消的掛單。", n?"a":"b");
+      repaint(); break;
+    }
+
+    case "reset-breakers":
+      confirmModal("解除風控限制",
+        `將日虧/週虧基準、連續虧損計數與單日開倉次數全部歸零。<br><br>
+         <b>這是手動強制解除。</b>交易手冊的規定是停到下一個交易時段、並先檢討交易紀錄——
+         虧了 2% 就解除限制繼續做,正是這道風控要防止的行為。`,
+        "仍要解除", () => {
+          S.acct.dayAnchor = S.acct.equity;
+          S.acct.weekAnchor = S.acct.equity;
+          S.breaker = { daily:false, weekly:false, streak:false, cooldownUntil:0, streakCount:0, tradesToday:0 };
+          if (!S.killed) S.engine = "IDLE";
+          log("WARN","Circuit breakers manually reset by operator.");
+          toast("風控限制已解除。","a"); closeModal(); repaint();
+        }, "pri");
+      break;
+
+    case "strat-toggle": break; // handled on change
+
+    case "dm-tf": {
+      const k = t.dataset.k, tfc = S.strat.dualma.tf;
+      if (tfc[k] && DUALMA_TFS.filter(x=>tfc[x]).length === 1){
+        toast("雙均線至少要保留一個週期。","a"); break;
+      }
+      tfc[k] = !tfc[k];
+      log("INFO", `Dual MA ${TF[k].label} stream ${tfc[k]?"enabled":"disabled"}.`);
+      switchView("setup"); break;
+    }
+
+    case "alloc": {
+      const s = t.dataset.s, a = t.dataset.a;
+      S.strat[s].alloc[a] = !S.strat[s].alloc[a];
+      log("INFO", `${s.toUpperCase()} allocation ${S.strat[s].alloc[a]?"enabled":"disabled"} for ${a}.`);
+      switchView("setup"); break;
+    }
+
+    case "start-all":
+      S.strat.playbook.on = true; S.strat.dualma.on = true;
+      ASSETS.forEach(a=>{ S.strat.playbook.alloc[a]=true; S.strat.dualma.alloc[a]=true; });
+      log("WARN","策略已全部啟動(BTC / ETH / SOL)。");
+      toast("<b>策略已啟動。</b>條件符合時會自動進場。","a"); repaint(); break;
+
+    case "stop-all":
+      S.strat.playbook.on = false; S.strat.dualma.on = false;
+      log("WARN","策略已全部停用 — 不再開新倉(既有持倉保留止損止盈)。");
+      toast("策略已暫停。<br><span style=\"font-size:11.5px\">既有持倉仍會依止損止盈執行。</span>","a");
+      repaint(); break;
+
+    case "ex-test": testConnection(t.dataset.x); break;
+
+    case "ex-clear": {
+      const x = t.dataset.x;
+      S.ex[x] = { on:false, key:"", secret:"", pass:"", lat:null, tier:null, testing:false };
+      log("INFO", `${EXNAME[x]} credentials cleared.`);
+      switchView("setup"); break;
+    }
+
+    case "net": {
+      const wantMain = t.dataset.v === "main";
+      if (wantMain && S.testnet){
+        confirmModal("⚠ 切換到主網",
+          `主網會用<b>真實資金以 20× 槓桿</b>下單。<br><br>
+           依照交易手冊,實盤前應先完成<b>至少 100 筆手動回測</b>與<b>一整個月的模擬盤紀錄</b>,
+           而且只能使用「全部虧光也能承受」的資金。<br><br>
+           (此版本為模擬,實際上不會送出任何真實委託。)`,
+          "我了解,切換", () => {
+            S.testnet = false; log("ERR","SWITCHED TO MAINNET — live capital mode.");
+            toast("已切換到<b>主網</b>。","r",7000); closeModal(); switchView("setup");
+          });
+      } else if (!wantMain) {
+        S.testnet = true; log("INFO","Switched to TESTNET.");
+        switchView("setup");
+      }
+      break;
+    }
+
+    case "calc-sync": syncCalc(); calcSizing(); break;
+
+    case "bt-run": {
+      const num = (id,d) => { const v = parseFloat(($("#"+id)||{}).value); return isFinite(v)?v:d; };
+      BT.cfg.years   = clamp(Math.round(num("bt-years",10)),1,20);
+      BT.cfg.equity  = Math.max(100, num("bt-eq",10000));
+      BT.cfg.volScale= clamp(num("bt-vol",1),0.3,3);
+      BT.cfg.regime  = ($("#bt-regime")||{}).value || "neutral";
+      BT.cfg.seed    = (($("#bt-seed")||{}).value || "").trim();
+      BT.cfg.playbook= ($("#bt-pb")||{}).checked;
+      BT.cfg.m15     = ($("#bt-m15")||{}).checked;
+      BT.cfg.h4      = ($("#bt-h4")||{}).checked;
+      BT.cfg.dualma  = BT.cfg.m15 || BT.cfg.h4;
+      BT.cfg.breakers= ($("#bt-brk")||{}).checked;
+      if (!BT.cfg.playbook && !BT.cfg.dualma){
+        toast("請至少啟用一個策略。","r"); break;
+      }
+      startBacktest();
+      V.backtest.progress();
+      break;
+    }
+    case "bt-cancel": BT.cancel = true; toast("正在取消回測…","a"); break;
+    case "bt-export": {
+      if (!BT.res) break;
+      const head = "closed_bar,asset,exchange,strategy,timeframe,side,entry,exit,qty,notional,margin,sl,tp,pnl,r_multiple,reason,trigger";
+      const rows = BT.res.tradeList.map(t=>[t.closed,t.asset,t.ex,t.strat,t.tf,t.side,
+        t.entry,t.exit,t.qty,t.notional,t.margin,t.sl,t.tp,t.pnl.toFixed(2),t.r.toFixed(3),
+        t.reason,(t.trigger||"").replace(/,/g,";")].join(","));
+      const blob = new Blob([head+"\n"+rows.join("\n")],{type:"text/csv"});
+      const a2 = document.createElement("a");
+      a2.href = URL.createObjectURL(blob);
+      a2.download = `backtest-${BT.res.cfg.years}y-seed${BT.res.seed}.csv`;
+      a2.click(); URL.revokeObjectURL(a2.href);
+      toast(`已匯出 <b>${BT.res.tradeList.length}</b> 筆交易。`,"g"); break;
+    }
+
+    case "clear-logs": S.logs = []; log("INFO","Log buffer cleared."); switchView("console"); break;
+
+    case "export-logs": {
+      const txt = S.logs.slice().reverse()
+        .map(l=>`${new Date(l.t).toISOString()}  [${l.level}]  ${l.msg}`).join("\n");
+      const blob = new Blob([txt], {type:"text/plain"});
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `quant-terminal-log-${Date.now()}.txt`;
+      a.click(); URL.revokeObjectURL(a.href);
+      toast("訊息已匯出。","g"); break;
+    }
+
+    case "modal-ok": { const f = $("#modal-root")._ok; if (f) f(); break; }
+    case "modal-cancel": closeModal(); break;
+    case "modal-bg": if (e.target.classList.contains("mask")) closeModal(); break;
+  }
+});
+
+document.addEventListener("change", e => {
+  const t = e.target.closest("[data-action]");
+  if (!t) return;
+  const A = t.dataset.action;
+
+  if (A === "strat-toggle"){
+    const s = t.dataset.s;
+    S.strat[s].on = t.checked;
+    log(t.checked?"WARN":"INFO",
+        `${s==="playbook"?"7-Step Playbook":"Dual MA System"} ${t.checked?"ARMED":"disarmed"}.`);
+    repaint();
+  }
+  if (A === "ex-toggle"){
+    const x = t.dataset.x, e2 = S.ex[x];
+    if (t.checked){
+      if (!e2.key || !e2.secret || (x==="bitget" && !e2.pass)){
+        t.checked = false;
+        toast(`<b>${EXNAME[x]}</b><br>請先填入 API Key、Secret${x==="bitget"?" 與 Passphrase":""}。`,"r");
+        return;
+      }
+      if (e2.lat === null){ t.checked = false; toast("請先按<b>測試</b>確認連線。","a"); return; }
+      e2.on = true; log("INFO", `${EXNAME[x]} connected · ${e2.lat} ms · ${e2.tier} · ${S.testnet?"TESTNET":"MAINNET"}`);
+      toast(`<b>${EXNAME[x]}</b> 已連線。`,"g");
+    } else {
+      e2.on = false; log("WARN", `${EXNAME[x]} disconnected.`);
+    }
+    repaint();
+  }
+  if (A === "ma"){
+    const f = t.dataset.f;
+    let v = parseFloat(t.value);
+    if (!isFinite(v)) return;
+    if (f==="fast") v = clamp(Math.round(v),2,60);
+    if (f==="slow") v = clamp(Math.round(v),5,200);
+    if (f==="adxMin") v = clamp(v,0,60);
+    if (f==="volMult") v = clamp(v,0.5,5);
+    S.strat.dualma[f] = v; t.value = v;
+    if (S.strat.dualma.fast >= S.strat.dualma.slow){
+      toast("Fast EMA must be shorter than slow EMA — auto-corrected.","a");
+      S.strat.dualma.slow = S.strat.dualma.fast + 5;
+    }
+    log("INFO", `Dual MA parameter ${f} → ${v}`);
+    computeIndicators(); repaint();
+  }
+  if (A === "live-toggle"){ liveToggle(t.checked); repaint(); }
+  if (A === "ma-bool"){ S.strat.dualma[t.dataset.f] = t.checked; repaint(); }
+  if (A === "calc"){ if (t.id==="rc-asset") syncCalc(); calcSizing(); }
+});
+
+document.addEventListener("input", e => {
+  const t = e.target.closest("[data-action]");
+  if (!t) return;
+  if (t.dataset.action === "ex-field") S.ex[t.dataset.x][t.dataset.f] = t.value.trim();
+  if (t.dataset.action === "logfilter") S.logFilter = t.value;
+  if (t.dataset.action === "calc") calcSizing();
+});
+
+/* ---------------------------------------------------------------- *
+ * 17. ACTIONS
+ * ---------------------------------------------------------------- */
+function engageKill(){
+  const n = S.positions.length;
+  [...S.positions].forEach(p => closePosition(p, "KILL SWITCH"));
+  S.orders = S.orders.filter(o => o.status !== "PENDING");
+  S.killed = true;
+  S.engine = "KILLED";
+  S.strat.playbook.on = false;
+  S.strat.dualma.on = false;
+  log("ERR", `KILL SWITCH ENGAGED — ${n} position(s) flattened, strategies disarmed, engine stopped.`);
+  toast("<b>已緊急停止</b><br>所有持倉已平倉,引擎已關閉。","r",9000);
+}
+
+function testConnection(id){
+  const e = S.ex[id];
+  if (!e.key || !e.secret || (id==="bitget" && !e.pass)){
+    $("#ex-res-"+id).innerHTML = `<span class="chip r">缺少金鑰</span>`;
+    toast(`<b>${EXNAME[id]}</b><br>需要 API Key、Secret${id==="bitget"?" 與 Passphrase":""}。`,"r");
+    return;
+  }
+  e.testing = true;
+  $("#ex-res-"+id).innerHTML = `<span class="chip a">連線中…</span>`;
+  log("INFO", `${EXNAME[id]} — connection test initiated (${S.testnet?"testnet":"mainnet"} endpoint, simulated).`);
+  setTimeout(()=>{
+    e.testing = false;
+    e.lat = 18 + Math.floor(Math.random()*120);
+    e.tier = ["VIP 0","VIP 1","VIP 2","Regular"][Math.floor(Math.random()*4)];
+    const el = $("#ex-res-"+id);
+    if (el) el.innerHTML = `<span class="chip g">正常 · ${e.lat} ms</span>`;
+    log("INFO", `${EXNAME[id]} handshake OK — ${e.lat} ms · tier ${e.tier} · isolated 20× confirmed.`);
+    toast(`<b>${EXNAME[id]}</b> 連線正常<br>
+      <span style="font-family:var(--mono);font-size:11px">${e.lat} ms · ${e.tier} · 請開啟右側開關</span>`,"g");
+    repaint();
+  }, 550 + Math.random()*700);
+}
+
+function syncCalc(){
+  const a = $("#rc-asset") ? $("#rc-asset").value : "BTC";
+  const k = $("#rc-tf") ? $("#rc-tf").value : "h4";
+  const m = S.mkt[a], c = CFG.assets[a];
+  const I = m.tf && m.tf[k];
+  if ($("#rc-entry")) $("#rc-entry").value = m.last.toFixed(c.dp);
+  if ($("#rc-atr"))   $("#rc-atr").value = (I ? I.atr : m.last*0.01).toFixed(c.dp);
+  if ($("#rc-eq"))    $("#rc-eq").value = S.acct.equity.toFixed(2);
+}
+
+/* ---------------------------------------------------------------- *
+ * 18. DISCLAIMER
+ * ---------------------------------------------------------------- */
+const DISCLAIMER = `
+<div class="disc">
+  <b>模擬說明。</b>本頁面為前端原型。所有價格、成交、餘額、延遲與帳戶等級都由本機的隨機模型產生,
+  不會連線任何交易所,也不會送出任何委託。模擬結果不能證明任何策略會獲利。
+  <br><br>
+  <b>風險聲明。</b>本頁內容不構成投資、財務或交易建議。槓桿合約有極高的全額虧損風險:
+  20× 之下,逆向約 5% 就會被強制平倉;跳空、資金費率或交易所故障都可能造成超出預期的損失。
+  過往績效(無論模擬或實際)都不代表未來結果。請只用你能承受全部虧光的資金,必要時諮詢持牌財務顧問。
+  <br><br>
+  <b>投入真實資金前。</b>原始教材要求先完成至少 100 筆手動回測與一整個月的模擬盤紀錄,
+  並且把<i>執行紀律</i>看得比損益更重要——執行率低於 90% 時,任何獲利數字都沒有分析價值。
+</div>`;
+
+/* ---------------------------------------------------------------- *
+ * 19. BOOT
+ * ---------------------------------------------------------------- */
+function repaint(){
+  paintHeader();
+  if (V[S.view]) V[S.view].refresh();
+}
+
+function boot(){
+  seedMarket();
+  computeIndicators();
+  ASSETS.forEach(a=>{
+    evalCache.playbook[a] = evalPlaybook(a);
+    evalCache.dualma[a] = {};
+    DUALMA_TFS.forEach(k => { evalCache.dualma[a][k] = evalDualMA(a, k); });
+  });
+  S.equityCurve.push(S.acct.equity);
+
+  log("INFO","QUANT TERMINAL v2.4 啟動 — 模擬模式,未連接任何真實交易所端點。");
+  log("INFO",`交易標的:BTC · ETH · SOL ｜ 交易所:Binance / Bitget 合約 ｜ 槓桿鎖定 20× 逐倉。`);
+  log("INFO",`週期:基礎資料 15m ｜ 七關趨勢法於 4H 執行(方向看 W1、空間看 D1)｜ 雙均線同時運行 15m 與 4H。`);
+  log("RISK",`風險模型:單筆 ${(CFG.riskPct*100).toFixed(1)}% · 止損 ≥ ${CFG.slAtrMult}×ATR(14) · 最低盈虧比 1:${CFG.minRR} · 保證金使用率 < ${CFG.maxMarginUse*100}%。`);
+  log("RISK",`風控已啟用:日虧 -${CFG.breakers.daily*100}% · 週虧 -${CFG.breakers.weekly*100}% · 連虧 ${CFG.breakers.streak} 筆進入冷卻 · 單日最多 ${CFG.breakers.maxTradesDay} 筆。`);
+  log("WARN","尚未連線交易所。請到「設定」填入 API 金鑰後才能執行交易。");
+
+  switchView("console");
+  paintHeader();
+  liveConnect();      // public market data only — no key, no account access
+
+  setInterval(() => {
+    // A backtest swaps S.mkt / S.acct / S.positions for its own world; the live
+    // loop must not touch them while that is in flight.
+    if (S.paused){ if (S.view === "backtest") V.backtest.progress(); return; }
+    tickPrices();
+    jitterLatency();
+    if (Date.now() - S.lastBar > CFG.barMs){ S.lastBar = Date.now(); rollBar(); }
+    runEngine();
+    repaint();
+  }, CFG.tickMs);
+
+  setTimeout(()=>toast(
+    `<b>模擬已啟動。</b><br><span style="font-size:11.5px">到「設定」隨意填入金鑰 →
+     按<b>測試</b> → 開啟開關,機器人就會開始運作。</span>`,"a",11000), 900);
+}
+
+boot();
+</script>
+</body>
+</html>

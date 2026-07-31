@@ -1,0 +1,39 @@
+# This folder also holds unrelated projects and personal study material.
+# They are excluded deliberately — see README. Do not remove these lines
+# without checking for API keys, tokens or personal trading data first.
+fxbot/
+swing/
+.claude/
+
+# Personal study notes derived from third-party copyrighted material
+# (a paid PDF and a YouTube course). Not redistributable.
+交易操作手冊.html
+趨勢交易完整教學.html
+市場結構完整教學.html
+
+# Secrets — never commit
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+config.local.*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Data
+*.parquet
+*.sqlite
+*.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
