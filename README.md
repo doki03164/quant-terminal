@@ -23,6 +23,15 @@ git clone https://github.com/doki03164/quant-terminal.git
 
 或只開網頁:直接打開 `crypto-bot-dashboard.html`(純模擬,不含真實資產顯示)。
 
+**用哪個瀏覽器開?** `start.cmd` 會自動找 Brave。要指定其他瀏覽器,設環境變數:
+
+```powershell
+$env:QT_BROWSER = "C:\Program Files\Mozilla Firefoxirefox.exe"
+```
+
+> Windows 把 **`.html` 檔案關聯**和 **`https` 協定關聯**分開處理。就算 Brave 是你的預設瀏覽器,
+> `.html` 檔案仍可能開在 Edge —— 所以啟動器直接指定執行檔,不依賴檔案關聯。
+
 > 網頁為什麼不能自己啟動後端?因為 `file://` 頁面若能執行本機程序,等於任何網站都能在你電腦上跑程式。
 > 這是瀏覽器的安全設計,所以由 `start.cmd` 代勞。
 

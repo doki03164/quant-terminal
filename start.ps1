@@ -91,8 +91,30 @@ try {
 } catch { }
 
 # ---- 6. 開啟儀表板 ----------------------------------------------------
-Info "開啟儀表板…"
-Start-Process $dash
+# Windows keeps the .html FILE association separate from the https protocol
+# association. Brave can be your default browser and .html can still open in
+# Edge, which is why the dashboard kept launching in the wrong browser.
+# Prefer an explicit browser here rather than relying on the file association.
+#
+# Override with:  $env:QT_BROWSER = "C:\path\to\browser.exe"
+$browser = $env:QT_BROWSER
+if (-not $browser -or -not (Test-Path $browser)) {
+    $candidates = @(
+        "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "${env:ProgramFiles(x86)}\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\Application\brave.exe"
+    )
+    $browser = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
+if ($browser) {
+    Info "開啟儀表板(Brave)…"
+    Start-Process -FilePath $browser -ArgumentList $dash
+} else {
+    Warn "找不到 Brave,改用系統預設程式開啟 .html。"
+    Warn "若想固定用某個瀏覽器,設定環境變數 QT_BROWSER 指向它的 exe。"
+    Start-Process $dash
+}
 
 Info "完成。後端會持續在背景執行,關掉瀏覽器也不影響。"
 Info "停止後端:taskkill /F /IM quant-terminal-backend.exe"
