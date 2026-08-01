@@ -49,15 +49,24 @@ pub struct OrderResp {
     pub note: String,
 }
 
+// These read the .env file on each call rather than a snapshot taken at
+// startup, so editing the file takes effect without a restart. Arming still
+// requires deliberately editing that file, so the property that the UI cannot
+// arm trading is unchanged.
 pub fn live_enabled() -> bool {
-    env::var("LIVE_TRADING").map(|v| v == "true").unwrap_or(false)
+    crate::envcfg::live_value("LIVE_TRADING").map(|v| v == "true").unwrap_or(false)
+}
+/// Pure so the shipped default can be asserted without depending on whatever
+/// happens to be in .env on the machine running the tests.
+fn dry_run_from(v: Option<String>) -> bool {
+    // Defaults to TRUE. You must explicitly opt out of the safe mode.
+    v.map(|x| x != "false").unwrap_or(true)
 }
 pub fn dry_run() -> bool {
-    // Defaults to TRUE. You must explicitly opt out of the safe mode.
-    env::var("DRY_RUN").map(|v| v != "false").unwrap_or(true)
+    dry_run_from(crate::envcfg::live_value("DRY_RUN"))
 }
 fn max_notional() -> f64 {
-    env::var("MAX_ORDER_NOTIONAL_USDT").ok()
+    crate::envcfg::live_value("MAX_ORDER_NOTIONAL_USDT")
         .and_then(|v| v.parse().ok())
         .unwrap_or(100.0)
 }
@@ -323,9 +332,16 @@ mod tests {
 
     #[test]
     fn dry_run_defaults_to_true_when_unset() {
-        // Reads the ambient env deliberately: this asserts the SHIPPED default.
-        if std::env::var("DRY_RUN").is_err() {
-            assert!(dry_run(), "DRY_RUN must default to true");
-        }
+        assert!(dry_run_from(None), "an absent DRY_RUN must mean the safe mode");
+    }
+
+    #[test]
+    fn dry_run_is_only_disabled_by_the_exact_word_false() {
+        assert!(!dry_run_from(Some("false".into())));
+        // anything else keeps the safe mode — a typo must not arm sending
+        assert!(dry_run_from(Some("FALSE".into())));
+        assert!(dry_run_from(Some("0".into())));
+        assert!(dry_run_from(Some("no".into())));
+        assert!(dry_run_from(Some("".into())));
     }
 }

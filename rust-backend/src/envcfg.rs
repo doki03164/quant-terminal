@@ -33,6 +33,23 @@ const SECRET: &[&str] = &[
     "BINANCE_API_KEY", "BITGET_API_KEY",
 ];
 
+/// Current value of a key straight from the .env FILE, falling back to the
+/// process environment.
+///
+/// dotenvy loads .env once at startup, so editing the file left a running
+/// server behaving on stale values while the dashboard displayed the new ones.
+/// There was no way to see the two had diverged — which is exactly how
+/// DRY_RUN=false in the file coexisted with dry_run=true in the process.
+/// Safety-relevant switches are therefore re-read on every use.
+pub fn live_value(key: &str) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(env_path()) {
+        if let Some(v) = parse(&text).get(key) {
+            return Some(v.clone());
+        }
+    }
+    std::env::var(key).ok()
+}
+
 pub fn env_path() -> PathBuf {
     PathBuf::from(std::env::var("ENV_PATH").unwrap_or_else(|_| ".env".into()))
 }

@@ -347,6 +347,19 @@ async fn get_diag(State(st): State<Arc<AppState>>) -> Json<serde_json::Value> {
             Err(e) => serde_json::json!({"configured": true, "ok": false, "error": e.to_string()}),
         },
     };
+    // API keys are captured into AppState at boot, so a file edit to those
+    // does NOT take effect until restart. Say so rather than letting the
+    // dashboard show one thing while the server uses another.
+    let mut stale: Vec<String> = Vec::new();
+    let file_key = |k: &str| envcfg::live_value(k).unwrap_or_default();
+    let loaded_key = |o: &Option<Keys>| o.as_ref().map(|k| k.key.clone()).unwrap_or_default();
+    if file_key("BINANCE_API_KEY") != loaded_key(&st.binance) {
+        stale.push("BINANCE_API_KEY".into());
+    }
+    if file_key("BITGET_API_KEY") != loaded_key(&st.bitget) {
+        stale.push("BITGET_API_KEY".into());
+    }
+    out["restart_required_for"] = serde_json::json!(stale);
     out["endpoint"] = serde_json::json!(base);
     out["live_trading"] = serde_json::json!(trade::live_enabled());
     out["dry_run"] = serde_json::json!(trade::dry_run());
