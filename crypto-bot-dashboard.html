@@ -1200,7 +1200,7 @@ function evalPlaybook(asset){
     push(5,"fail",`RR 1:${rr.toFixed(2)} < 1:${CFG.minRR} → skip (never shrink SL)`);
     skipRest(6); return { gates:g, ok:false, stop:5, dir, side };
   }
-  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  const sizing = sizePosition(sizingEquity(), slDist, entry, asset);
   if (!sizing.ok){
     push(5,"fail",sizing.why);
     skipRest(6); return { gates:g, ok:false, stop:5, dir, side };
@@ -1268,7 +1268,7 @@ function evalDualMA(asset, tfKey){
   const slDist = CFG.slAtrMult * I.atr;
   const sl = dir==="UP" ? entry-slDist : entry+slDist;
   const tp = dir==="UP" ? entry + slDist*CFG.minRR : entry - slDist*CFG.minRR;
-  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  const sizing = sizePosition(sizingEquity(), slDist, entry, asset);
   if (!sizing.ok) { checks.push({k:"Sizing", ok:false, v:sizing.why});
                     return { checks, ok:false, side, dir, tf:label, tfKey }; }
   checks.push({ k:"Sizing", ok:true, v:`${sizing.qty.toFixed(4)} ${asset} · margin ${usd(sizing.margin)}` });
@@ -1346,7 +1346,7 @@ function evalMacd(asset, tfKey){
   const slDist = CFG.slAtrMult * I.atr;
   const sl = above ? entry - slDist : entry + slDist;
   const tp = above ? entry + slDist*C.rr : entry - slDist*C.rr;
-  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  const sizing = sizePosition(sizingEquity(), slDist, entry, asset);
   if (!sizing.ok){ checks.push({k:"倉位",ok:false,v:sizing.why});
                    return { checks, ok:false, side, dir, tf:label, tfKey }; }
   checks.push({ k:"倉位", ok:true, v:`${sizing.qty.toFixed(4)} ${asset} · 保證金 ${usd(sizing.margin)}` });
@@ -1446,7 +1446,7 @@ function evalTurtle(asset, tfKey){
   checks.push({ k:`N = ATR(${C.atrN})`, ok:true,
     v:`${fmt(N,2)} · 停損 ${C.stopN}N = ${fmt(slDist,2)}` });
 
-  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  const sizing = sizePosition(sizingEquity(), slDist, entry, asset);
   if (!sizing.ok){ checks.push({k:"倉位",ok:false,v:sizing.why});
                    return { checks, ok:false, side, dir, tf:label, tfKey }; }
   checks.push({ k:"倉位", ok:true, v:`${sizing.qty.toFixed(4)} ${asset} · 盈虧比 1:${rr.toFixed(2)}` });
@@ -1525,7 +1525,7 @@ function evalRsi2(asset, tfKey){
   checks.push({ k:"目標", ok:true,
     v:`盈虧比 1:${C.rr}(均值回歸屬低盈虧比、高勝率)` });
 
-  const sizing = sizePosition(S.acct.equity, slDist, entry, asset);
+  const sizing = sizePosition(sizingEquity(), slDist, entry, asset);
   if (!sizing.ok){ checks.push({k:"倉位",ok:false,v:sizing.why});
                    return { checks, ok:false, side, dir, tf:label, tfKey }; }
   checks.push({ k:"倉位", ok:true, v:`${sizing.qty.toFixed(4)} ${asset}` });
@@ -1574,11 +1574,34 @@ function volScalar(asset){
   return clamp(med / atrPct, V.min, V.max);
 }
 
+/** Equity that position size is derived from.
+ *
+ *  The simulated account starts at $10,000 and grows on paper. Sizing a REAL
+ *  order from it asks the exchange for a position the account cannot cover —
+ *  a $10k-sized order against a $5 balance. When live orders are armed the
+ *  exchange balance is the only number that means anything. */
+function sizingEquity(){
+  if (S.btMode) return S.acct.equity;
+  const real = (typeof realOrderBlocker === "function" && realOrderBlocker() === null)
+    ? beEquity() : null;
+  return (real !== null && real > 0) ? real : S.acct.equity;
+}
+
+/** Exchange minimum order sizes. Below these the venue rejects outright, and
+ *  a 1% risk budget on a small balance lands under them very easily. */
+const MIN_QTY = { BTC:0.001, ETH:0.01, SOL:0.1, BNB:0.01, XRP:1, ADA:1,
+                  DOGE:1, AVAX:0.1, LINK:0.1, DOT:0.1, LTC:0.01, ATOM:0.1 };
+
 function sizePosition(equity, slDist, entry, asset){
   const riskAmt = equity * CFG.riskPct * volScalar(asset);
-  let qty = riskAmt / slDist;
   const step = CFG.assets[asset].qstep;
-  qty = Math.max(step, roundStep(qty, step));
+  const ideal = riskAmt / slDist;
+  // Rounding UP to the lot floor silently breaks the risk rule: on a small
+  // balance the smallest tradeable size can risk many times the budget.
+  // Round DOWN and let the minimum-size check reject it, rather than quietly
+  // turning a 1% trade into a 10% one.
+  let qty = Math.floor(ideal / step) * step;
+  qty = +qty.toFixed(8);
   const notional = qty * entry;
   const margin = notional / CFG.leverage;
   const usedMargin = S.positions.reduce((s,p)=>s+p.margin,0);
@@ -1586,7 +1609,23 @@ function sizePosition(equity, slDist, entry, asset){
   if (util > CFG.maxMarginUse)
     return { ok:false, why:`margin util ${(util*100).toFixed(0)}% > ${CFG.maxMarginUse*100}%`, qty, notional, margin, riskAmt, util };
   if (margin > equity)
-    return { ok:false, why:"insufficient margin", qty, notional, margin, riskAmt, util };
+    return { ok:false, why:"保證金不足", qty, notional, margin, riskAmt, util };
+  const minQ = Math.max(MIN_QTY[asset] || 0, step);
+  if (qty < minQ){
+    // Smallest tradeable size vs the risk budget it would actually consume.
+    const realRisk = minQ * slDist;
+    const needed = realRisk / CFG.riskPct;
+    return { ok:false, qty, notional, margin, riskAmt, util,
+             why:`最小下單量 ${minQ} ${asset} 會風險 ${usd(realRisk)},`
+               + `超出 ${(CFG.riskPct*100).toFixed(1)}% 預算 ${usd(riskAmt)} —— `
+               + `這個標的至少需要 ${usd(needed,0)} 帳戶才做得起來` };
+  }
+  // Belt and braces: never let rounding push actual risk past the budget.
+  const actualRisk = qty * slDist;
+  if (actualRisk > riskAmt * 1.05){
+    return { ok:false, qty, notional, margin, riskAmt, util,
+             why:`四捨五入後風險 ${usd(actualRisk)} 超出預算 ${usd(riskAmt)}` };
+  }
   return { ok:true, qty, notional, margin, riskAmt, util, fee: notional*CFG.takerFee };
 }
 
@@ -4285,8 +4324,22 @@ V.setup = {
     if (lo){
       const b = realOrderBlocker();
       lo.innerHTML = b === null
-        ? `<div class="note bad" style="font-size:11.5px"><b>⚠ 目前會送出真實委託</b> —
-            後端已解除鎖定,單筆名目上限 ${usd(BE.maxNotional,0)}。</div>`
+        ? (() => {
+          const eq = beEquity();
+          const maxNotional = BE.maxNotional || 0;
+          const capByBalance = eq !== null ? eq * CFG.leverage : 0;
+          const effective = Math.min(maxNotional, capByBalance || maxNotional);
+          return `<div class="note bad" style="font-size:11.5px">
+            <b>⚠ 目前會送出真實委託</b><br>
+            倉位以<b>交易所真實餘額 ${eq !== null ? usd(eq) : "讀取中"}</b> 計算,
+            不是模擬帳戶的 ${usd(S.acct.equity,0)}。<br>
+            實際可用名目上限 ${usd(effective,0)}
+            (名目上限 ${usd(maxNotional,0)} 與 餘額×20 取小)。
+            ${eq !== null && eq < 50
+              ? `<br><b>餘額偏低</b> —— ${(CFG.riskPct*100).toFixed(1)}% 風險算出的倉位
+                 很可能低於交易所最小下單量而被拒絕。` : ""}
+          </div>`;
+        })()
         : `<div class="note info" style="font-size:11.5px">
             目前<b>不會</b>送出真實委託 — ${esc(b)}。<br>
             需要全部滿足:儀表板開關開啟 · 後端連線 · <code>LIVE_TRADING=true</code> ·
