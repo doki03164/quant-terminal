@@ -1664,8 +1664,13 @@ function checkBreakers(){
   }
   return { dPnl, wPnl, halted: now };
 }
-const anyStratOn = () => S.strat.playbook.on || S.strat.dualma.on || S.strat.macd.on
-                      || S.strat.turtle.on || S.strat.rsi2.on;
+/** Every strategy the engine can run. Anything that enables or disables
+ *  strategies in bulk MUST iterate this — enumerating a subset by hand is how
+ *  "stop all strategies" ended up leaving three of them trading. */
+const STRAT_KEYS = ["playbook", "dualma", "macd", "turtle", "rsi2"];
+const anyStratOn = () => STRAT_KEYS.some(k => S.strat[k] && S.strat[k].on);
+const onStratCount = () => STRAT_KEYS.filter(k => S.strat[k] && S.strat[k].on).length;
+const setAllStrats = on => STRAT_KEYS.forEach(k => { if (S.strat[k]) S.strat[k].on = on; });
 const anyExOn = () => EXCHANGES.some(e => S.ex[e].on);
 const tradingBlocked = () =>
   S.killed || S.breaker.daily || S.breaker.weekly || S.breaker.streak ||
@@ -3282,7 +3287,7 @@ const zhSide   = s => s === "LONG" ? "做多" : "做空";
 /** Plain-language answer to "what is the bot doing right now?" */
 function botStatus(){
   const nEx = EXCHANGES.filter(e => S.ex[e].on).length;
-  const nSt = (S.strat.playbook.on?1:0) + (S.strat.dualma.on?1:0);
+  const nSt = onStratCount();
   if (S.killed)
     return { k:"bad", ic:"■", a:"已緊急停止",
              b:"所有持倉已平倉,策略已關閉。重新啟動後才會再進場。",
@@ -3298,9 +3303,9 @@ function botStatus(){
              b:"到「設定」填入 API 金鑰並測試連線,機器人才能運作。",
              act:`<button class="btn pri" data-action="nav" data-view="setup">前往設定</button>` };
   if (!nSt)
-    return { k:"off", ic:"○", a:"策略未啟動",
-             b:`已連線 ${nEx} 個交易所,但沒有啟用任何策略。`,
-             act:`<button class="btn pri" data-action="start-all">啟動策略</button>` };
+    return { k:"off", ic:"○", a:"尚未啟用任何策略",
+             b:`已連線 ${nEx} 個交易所。到「設定 → 2 · 策略」選擇要用哪些策略。`,
+             act:`<button class="btn pri" data-action="nav" data-view="setup">選擇策略</button>` };
   if (S.breaker.tradesToday >= CFG.breakers.maxTradesDay)
     return { k:"warn", ic:"◐", a:"今日已達交易上限",
              b:`已開 ${S.breaker.tradesToday} 筆(上限 ${CFG.breakers.maxTradesDay} 筆)。持倉照常管理,不再開新倉。`,
@@ -3308,10 +3313,14 @@ function botStatus(){
   const blocker = realOrderBlocker();
   if (blocker === null)
     return { k:"bad", ic:"●", a:"實盤下單執行中 — 使用真實資金",
-             b:`${nSt} 個策略運行中,單筆名目上限 ${usd(BE.maxNotional,0)}。委託會真的送到交易所。`,
+             b:`執行中:<b>${STRAT_KEYS.filter(k=>S.strat[k]&&S.strat[k].on)
+                  .map(k=>({playbook:"七關",dualma:"雙均線",macd:"MACD",turtle:"海龜",rsi2:"RSI2"})[k])
+                  .join("、")}</b>(${nSt} 個),單筆名目上限 ${usd(BE.maxNotional,0)}。委託會真的送到交易所。`,
              act:`<button class="btn red" data-action="panic">立即停止實盤</button>` };
+  const ZH = { playbook:"七關", dualma:"雙均線", macd:"MACD", turtle:"海龜", rsi2:"RSI2" };
+  const names = STRAT_KEYS.filter(k => S.strat[k] && S.strat[k].on).map(k => ZH[k]).join("、");
   return { k:"on", ic:"●", a:"機器人執行中(模擬)",
-           b:`${nSt} 個策略運行中,20× 逐倉。`
+           b:`執行中:<b>${names}</b>(${nSt} 個),20× 逐倉。`
             + `<b>不會送出真實委託</b> — ${blocker}。`,
            act:`<button class="btn sm" data-action="stop-all">暫停策略</button>` };
 }
@@ -4557,8 +4566,7 @@ document.addEventListener("click", e => {
          已開倉的部位<b>不會</b>自動平倉 —— 若要一併平掉,請按主控台的「全部平倉」。`,
         "停止實盤", async () => {
           S.liveOrders = false;
-          S.strat.playbook.on = S.strat.dualma.on = S.strat.macd.on = false;
-          S.strat.turtle.on = S.strat.rsi2.on = false;
+          setAllStrats(false);
           try {
             await fetch(`${BE.url}/api/env`, { method:"POST",
               headers:{"Content-Type":"application/json"},
@@ -4623,16 +4631,17 @@ document.addEventListener("click", e => {
       switchView("setup"); break;
     }
 
+    // Choosing strategies is the operator's call. This used to force
+    // playbook+dualma on, quietly overwriting whatever had been selected.
     case "start-all":
-      S.strat.playbook.on = true; S.strat.dualma.on = true;
-      ASSETS.forEach(a=>{ S.strat.playbook.alloc[a]=true; S.strat.dualma.alloc[a]=true; });
-      log("WARN","策略已全部啟動(BTC / ETH / SOL)。");
-      toast("<b>策略已啟動。</b>條件符合時會自動進場。","a"); repaint(); break;
+      switchView("setup");
+      toast("在「2 · 策略」選擇要啟用的策略,打開右側開關即可。","a", 7000);
+      break;
 
     case "stop-all":
-      S.strat.playbook.on = false; S.strat.dualma.on = false;
-      log("WARN","策略已全部停用 — 不再開新倉(既有持倉保留止損止盈)。");
-      toast("策略已暫停。<br><span style=\"font-size:11.5px\">既有持倉仍會依止損止盈執行。</span>","a");
+      setAllStrats(false);
+      log("WARN", `策略已全部停用(${STRAT_KEYS.length} 個)— 不再開新倉,既有持倉保留止損止盈。`);
+      toast("策略已全部暫停。<br><span style=\"font-size:11.5px\">既有持倉仍會依止損止盈執行。</span>","a");
       repaint(); break;
 
     case "ex-test": testConnection(t.dataset.x); break;
