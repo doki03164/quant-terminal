@@ -2723,6 +2723,7 @@ const BE = {
   url: "http://127.0.0.1:8787",
   up: false, checking: false,
   trading: false, dryRun: true, maxNotional: 0,
+  binanceConfigured: false, bitgetConfigured: false,
   bal: null, err: "", lastAt: 0,
 };
 
@@ -2737,6 +2738,9 @@ async function beHealth(){
     BE.trading = !!h.trading_enabled;
     BE.dryRun = h.dry_run !== false;
     BE.maxNotional = h.max_order_notional_usdt || 0;
+    BE.binanceConfigured = !!h.binance_configured;
+    BE.bitgetConfigured = !!h.bitget_configured;
+    if (syncExchangesFromBackend()) repaint();
   } catch(e){
     BE.up = false; BE.trading = false; BE.err = String(e.message || e);
   }
@@ -2796,6 +2800,17 @@ function cfgSnapshot(){
                   slow: S.strat.dualma.slow, adx_min: S.strat.dualma.adxMin,
                   vol_mult: S.strat.dualma.volMult,
                   use_trend_filter: S.strat.dualma.useTrendFilter },
+      turtle:   { on: S.strat.turtle.on, alloc: Object.assign({}, S.strat.turtle.alloc),
+                  tf: Object.assign({}, S.strat.turtle.tf), system: S.strat.turtle.system,
+                  entry_n: S.strat.turtle.entryN, exit_n: S.strat.turtle.exitN,
+                  entry_n2: S.strat.turtle.entryN2, exit_n2: S.strat.turtle.exitN2,
+                  atr_n: S.strat.turtle.atrN, stop_n: S.strat.turtle.stopN,
+                  use_loss_filter: S.strat.turtle.useLossFilter },
+      rsi2:     { on: S.strat.rsi2.on, alloc: Object.assign({}, S.strat.rsi2.alloc),
+                  tf: Object.assign({}, S.strat.rsi2.tf), rsi_len: S.strat.rsi2.rsiLen,
+                  trend_len: S.strat.rsi2.trendLen, buy_below: S.strat.rsi2.buyBelow,
+                  sell_above: S.strat.rsi2.sellAbove, stop_atr: S.strat.rsi2.stopAtr,
+                  rr: S.strat.rsi2.rr },
       macd:     { on: S.strat.macd.on, alloc: Object.assign({}, S.strat.macd.alloc),
                   tf: Object.assign({}, S.strat.macd.tf), fast: S.strat.macd.fast,
                   slow: S.strat.macd.slow, signal: S.strat.macd.signal,
@@ -2833,6 +2848,26 @@ function cfgApply(c){
     if (typeof d.adx_min === "number") S.strat.dualma.adxMin = d.adx_min;
     if (typeof d.vol_mult === "number") S.strat.dualma.volMult = d.vol_mult;
     if (typeof d.use_trend_filter === "boolean") S.strat.dualma.useTrendFilter = d.use_trend_filter;
+  }
+  if (st.turtle){
+    const t2 = st.turtle;
+    S.strat.turtle.on = !!t2.on;
+    if (t2.alloc) Object.assign(S.strat.turtle.alloc, t2.alloc);
+    if (t2.tf) Object.assign(S.strat.turtle.tf, t2.tf);
+    if (t2.system) S.strat.turtle.system = t2.system;
+    const tm = { entryN:"entry_n", exitN:"exit_n", entryN2:"entry_n2",
+                 exitN2:"exit_n2", atrN:"atr_n", stopN:"stop_n" };
+    Object.keys(tm).forEach(k => { if (t2[tm[k]]) S.strat.turtle[k] = t2[tm[k]]; });
+    if (typeof t2.use_loss_filter === "boolean") S.strat.turtle.useLossFilter = t2.use_loss_filter;
+  }
+  if (st.rsi2){
+    const r2 = st.rsi2;
+    S.strat.rsi2.on = !!r2.on;
+    if (r2.alloc) Object.assign(S.strat.rsi2.alloc, r2.alloc);
+    if (r2.tf) Object.assign(S.strat.rsi2.tf, r2.tf);
+    const rm = { rsiLen:"rsi_len", trendLen:"trend_len", buyBelow:"buy_below",
+                 sellAbove:"sell_above", stopAtr:"stop_atr", rr:"rr" };
+    Object.keys(rm).forEach(k => { if (typeof r2[rm[k]] === "number") S.strat.rsi2[k] = r2[rm[k]]; });
   }
   if (st.macd){
     const m = st.macd;
@@ -3029,6 +3064,37 @@ function envEditorHTML(){
       金鑰是<b>遮蔽顯示</b>的,留空或不動即維持原值。修改金鑰後需<b>重啟後端</b>才生效。
       金鑰會經由瀏覽器傳到本機服務 —— 請確認沒有安裝來路不明的瀏覽器擴充套件。
     </div>`;
+}
+
+/** Adopt the backend's view of which venues are configured.
+ *  The backend holds the real keys, so it — not the page — is the authority
+ *  on whether a venue is usable. Without this, every refresh dropped the
+ *  connection and made you redo the setup even though nothing had changed. */
+function syncExchangesFromBackend(){
+  if (!BE.up) return false;
+  let changed = false;
+  const cfgd = {
+    binance: !!(BE.bal ? BE.bal.binance.connected : false) || !!BE.binanceConfigured,
+    bitget:  !!(BE.bal ? BE.bal.bitget.connected  : false) || !!BE.bitgetConfigured,
+  };
+  EXCHANGES.forEach(id => {
+    const e = S.ex[id];
+    if (cfgd[id] && !e.on){
+      e.on = true;
+      e.key = e.key || "(後端保管)";
+      e.secret = e.secret || "(後端保管)";
+      if (id === "bitget") e.pass = e.pass || "(後端保管)";
+      if (e.lat === null) e.lat = 40;
+      e.tier = e.tier || "BACKEND";
+      changed = true;
+      log("INFO", `${EXNAME[id]} 由後端提供金鑰,已自動連線。`);
+    } else if (!cfgd[id] && e.tier === "BACKEND" && e.on){
+      // backend lost the key — reflect that rather than showing a stale state
+      e.on = false; changed = true;
+      log("WARN", `${EXNAME[id]} 後端已無金鑰,連線解除。`);
+    }
+  });
+  return changed;
 }
 
 /* ------------------------------ 主控台 CONSOLE ------------------ */
@@ -3864,6 +3930,51 @@ V.setup = {
           </div>
           <div class="stratrow">
             <div class="info">
+              <div class="a">海龜交易法
+                <span class="chip a">系統 ${S.strat.turtle.system}</span>
+                ${DUALMA_TFS.filter(k=>S.strat.turtle.tf[k]).map(k=>
+                  `<span class="chip ${k==="m15"?"b":"v"}">${TF[k].label}</span>`).join("")}</div>
+              <div class="b">${S.strat.turtle.system===1
+                  ? `${S.strat.turtle.entryN} 期唐奇安通道突破進場、${S.strat.turtle.exitN} 期反向出場`
+                  : `${S.strat.turtle.entryN2} 期突破進場、${S.strat.turtle.exitN2} 期反向出場`},
+                N = ATR(${S.strat.turtle.atrN})、停損 ${S.strat.turtle.stopN}N。
+                <b>低勝率、高盈虧比</b> —— 靠許多小虧損換少數大趨勢。</div>
+            </div>
+            <div class="pick">
+              ${ASSETS.map(a=>`<button class="btn sm ${S.strat.turtle.alloc[a]?"grn":""}"
+                data-action="alloc" data-s="turtle" data-a="${a}">${a}</button>`).join("")}
+              ${DUALMA_TFS.map(k=>`<button class="btn sm ${S.strat.turtle.tf[k]?"pri":""}"
+                data-action="strat-tf" data-s="turtle" data-k="${k}">${TF[k].label}</button>`).join("")}
+              <button class="btn sm" data-action="turtle-sys">切換系統 ${S.strat.turtle.system===1?"2":"1"}</button>
+            </div>
+            <label class="sw"><input type="checkbox" data-action="strat-toggle" data-s="turtle"
+              ${S.strat.turtle.on?"checked":""}><span class="tr"></span></label>
+          </div>
+
+          <div class="stratrow">
+            <div class="info">
+              <div class="a">RSI${S.strat.rsi2.rsiLen} 均值回歸
+                ${DUALMA_TFS.filter(k=>S.strat.rsi2.tf[k]).map(k=>
+                  `<span class="chip ${k==="m15"?"b":"v"}">${TF[k].label}</span>`).join("")}
+                <span class="chip r">實測虧損</span></div>
+              <div class="b">EMA${S.strat.rsi2.trendLen} 定方向,RSI(${S.strat.rsi2.rsiLen})
+                ≤${S.strat.rsi2.buyBelow} 買、≥${S.strat.rsi2.sellAbove} 賣。
+                <b>股票日線文獻宣稱 75–79% 勝率,但我在 15m 加密貨幣實測是
+                52.2% 勝率、獲利因子 0.92、兩年 −75%。</b>
+                保留它是當作反例:別的市場的統計不會自動轉移。</div>
+            </div>
+            <div class="pick">
+              ${ASSETS.map(a=>`<button class="btn sm ${S.strat.rsi2.alloc[a]?"grn":""}"
+                data-action="alloc" data-s="rsi2" data-a="${a}">${a}</button>`).join("")}
+              ${DUALMA_TFS.map(k=>`<button class="btn sm ${S.strat.rsi2.tf[k]?"pri":""}"
+                data-action="strat-tf" data-s="rsi2" data-k="${k}">${TF[k].label}</button>`).join("")}
+            </div>
+            <label class="sw"><input type="checkbox" data-action="strat-toggle" data-s="rsi2"
+              ${S.strat.rsi2.on?"checked":""}><span class="tr"></span></label>
+          </div>
+
+          <div class="stratrow">
+            <div class="info">
               <div class="a">MACD + EMA${S.strat.macd.trendLen}
                 ${DUALMA_TFS.filter(k=>S.strat.macd.tf[k]).map(k=>
                   `<span class="chip ${k==="m15"?"b":"v"}">${TF[k].label}</span>`).join("")}</div>
@@ -4211,6 +4322,22 @@ document.addEventListener("click", e => {
     case "cfg-reset":  cfgReset(); V.setup.refresh(); break;
     case "cfg-import": { const f = $("#cfg-file"); if (f) f.click(); break; }
 
+    case "strat-tf": {
+      const sk = t.dataset.s, k = t.dataset.k, tfc = S.strat[sk].tf;
+      if (tfc[k] && DUALMA_TFS.filter(x=>tfc[x]).length === 1){
+        toast("至少要保留一個週期。","a"); break;
+      }
+      tfc[k] = !tfc[k];
+      log("INFO", `${sk} ${TF[k].label} 週期${tfc[k]?"啟用":"停用"}。`);
+      switchView("setup"); break;
+    }
+
+    case "turtle-sys": {
+      S.strat.turtle.system = S.strat.turtle.system === 1 ? 2 : 1;
+      log("INFO", `海龜切換為系統 ${S.strat.turtle.system}。`);
+      switchView("setup"); break;
+    }
+
     case "macd-tf": {
       const k = t.dataset.k, tfc = S.strat.macd.tf;
       if (tfc[k] && DUALMA_TFS.filter(x=>tfc[x]).length === 1){
@@ -4531,7 +4658,10 @@ function boot(){
   switchView("console");
   paintHeader();
   liveConnect();      // public market data only — no key, no account access
-  beHealth().then(()=>{ if (BE.up) beBalance(); });
+  beHealth().then(()=>{
+    if (!BE.up) return;
+    beBalance().then(()=>{ if (syncExchangesFromBackend()) repaint(); });
+  });
 
   setInterval(() => {
     // A backtest swaps S.mkt / S.acct / S.positions for its own world; the live
