@@ -3171,6 +3171,66 @@ async function submitRealClose(pos){
   }
 }
 
+/** Backend self-diagnosis: clock, credentials, per-venue errors.
+ *  Surfaced in the UI because these failures are otherwise invisible — the
+ *  balance simply reads zero and nothing explains why. */
+const DIAG = { data:null, busy:false, err:"", at:0 };
+
+async function diagRun(){
+  if (DIAG.busy || !BE.up) return;
+  DIAG.busy = true; DIAG.err = "";
+  try {
+    const r = await fetch(`${BE.url}/api/diag`, { cache:"no-store" });
+    DIAG.data = await r.json(); DIAG.at = Date.now();
+  } catch(e){ DIAG.err = String(e.message || e); }
+  DIAG.busy = false;
+  if (S.view === "setup") V.setup.refresh();
+}
+
+function diagHTML(){
+  if (!BE.up)
+    return `<div class="note info" style="font-size:11.5px">後端未連線,無法診斷。</div>`;
+  if (DIAG.err)
+    return `<div class="note bad" style="font-size:11.5px">診斷失敗:${esc(DIAG.err)}</div>`;
+  if (!DIAG.data)
+    return `<div style="padding:4px 0"><button class="btn sm" data-action="diag-run">執行診斷</button></div>`;
+
+  const d = DIAG.data;
+  const rows = [];
+
+  const c = d.clock || {};
+  rows.push(`<div class="kv"><span class="k">時鐘偏移</span>
+    <span class="v ${c.ok?"up":"dn"}">${c.skew_ms!==undefined?c.skew_ms+" ms":"—"}
+    ${c.ok?"":" ⚠"}</span></div>`);
+
+  ["binance","bitget"].forEach(v => {
+    const x = d[v] || {};
+    const probs = (d.credential_problems && d.credential_problems[v]) || [];
+    let state, cls;
+    if (!x.configured){ state = "未設定金鑰"; cls = "t4"; }
+    else if (x.ok){ state = `OK · 權益 ${usd(x.equity||0)}`; cls = "up"; }
+    else { state = "失敗"; cls = "dn"; }
+    rows.push(`<div class="kv"><span class="k">${v==="binance"?"Binance":"Bitget"}</span>
+      <span class="v ${cls}">${esc(state)}</span></div>`);
+    if (!x.ok && x.error)
+      rows.push(`<div style="font-size:11px;color:var(--dn);padding:2px 0 6px 0">
+        ↳ ${esc(x.error)}</div>`);
+    probs.forEach(pr => rows.push(
+      `<div class="note bad" style="font-size:11.5px;margin:4px 0">
+        <b>${v==="binance"?"Binance":"Bitget"} 金鑰問題:</b>${esc(pr)}</div>`));
+  });
+
+  rows.push(`<div class="kv"><span class="k">LIVE_TRADING</span>
+    <span class="v ${d.live_trading?"dn":"up"}">${d.live_trading?"true":"false"}</span></div>`);
+  rows.push(`<div class="kv"><span class="k">DRY_RUN</span>
+    <span class="v ${d.dry_run?"acc":"dn"}">${d.dry_run?"true(不會送出委託)":"false"}</span></div>`);
+
+  return rows.join("") + `<div style="margin-top:9px">
+    <button class="btn sm" data-action="diag-run">重新診斷</button>
+    <span class="mono t4" style="font-size:10px;margin-left:8px">
+      ${DIAG.at?new Date(DIAG.at).toLocaleTimeString():""}</span></div>`;
+}
+
 /* ------------------------------ 主控台 CONSOLE ------------------ */
 /* One operating screen: is it running, what is my money doing, what is
    open, stop it. Everything diagnostic lives behind a disclosure. */
@@ -4122,6 +4182,12 @@ V.setup = {
       </div>
 
       <div class="block">
+        <div class="bh"><span class="n">4.4 · 連線診斷</span>
+          <span class="d">讀不到餘額或沒下單時看這裡</span></div>
+        <div class="panel"><div class="pb" id="diag-box"></div></div>
+      </div>
+
+      <div class="block">
         <div class="bh"><span class="n">4.5 · 實盤下單</span>
           <span class="d">讓儀表板把訊號送到交易所</span></div>
         <div class="panel"><div class="pb">
@@ -4209,6 +4275,12 @@ V.setup = {
     // The setup view refreshes on every heartbeat. Re-rendering the editor
     // would destroy the <input> the user is typing into and drop focus mid-key,
     // so only paint when the underlying state actually changed.
+    const db = $("#diag-box");
+    if (db){
+      const stamp = [BE.up, DIAG.busy, DIAG.at, DIAG.err].join("|");
+      if (db.dataset.stamp !== stamp){ db.dataset.stamp = stamp; db.innerHTML = diagHTML(); }
+      if (BE.up && !DIAG.data && !DIAG.busy && !DIAG.err) diagRun();
+    }
     const lo = $("#lo-status");
     if (lo){
       const b = realOrderBlocker();
@@ -4446,6 +4518,8 @@ document.addEventListener("click", e => {
         });
       break;
     }
+
+    case "diag-run": diagRun(); break;
 
     case "cfg-save":   cfgSave(); V.setup.refresh(); break;
     case "cfg-load":   if (cfgLoad(false)) switchView("setup"); break;

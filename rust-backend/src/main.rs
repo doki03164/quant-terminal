@@ -60,6 +60,30 @@ struct AppState {
     bitget: Option<Keys>,
 }
 
+/// Catch the credential mistakes that produce opaque exchange errors.
+/// Pasting the secret into both fields yields "Apikey does not exist", which
+/// tells you nothing about what actually went wrong.
+fn credential_problems(venue: &str, k: &Keys) -> Vec<String> {
+    let mut out = Vec::new();
+    if k.key.trim().is_empty() { out.push("API Key 空白".into()); }
+    if k.secret.trim().is_empty() { out.push("Secret 空白".into()); }
+    if !k.key.trim().is_empty() && k.key.trim() == k.secret.trim() {
+        out.push("API Key 與 Secret 完全相同 —— 這是兩個不同的字串,很可能把同一個值貼進了兩個欄位".into());
+    }
+    if k.key.contains(char::is_whitespace) || k.secret.contains(char::is_whitespace) {
+        out.push("金鑰含空白字元 —— 複製貼上時可能夾帶了換行或空格".into());
+    }
+    if venue == "bitget" {
+        if k.passphrase.trim().is_empty() {
+            out.push("Bitget 需要 Passphrase,目前空白".into());
+        }
+        if !k.key.trim().is_empty() && !k.key.starts_with("bg_") {
+            out.push("Bitget 的 API Key 通常以 bg_ 開頭 —— 目前這個值看起來像 Secret 而不是 Key".into());
+        }
+    }
+    out
+}
+
 pub fn now_ms() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
 }
@@ -299,6 +323,13 @@ async fn get_diag(State(st): State<Arc<AppState>>) -> Json<serde_json::Value> {
         Err(e) => out["clock"] = serde_json::json!({"error": e.to_string()}),
     }
 
+    // Report credential shape first: an obviously wrong key makes the
+    // exchange's own error message useless for debugging.
+    let mut cred = serde_json::json!({});
+    if let Some(k) = &st.binance { cred["binance"] = serde_json::json!(credential_problems("binance", k)); }
+    if let Some(k) = &st.bitget  { cred["bitget"]  = serde_json::json!(credential_problems("bitget", k)); }
+    out["credential_problems"] = cred;
+
     out["binance"] = match &st.binance {
         None => serde_json::json!({"configured": false}),
         Some(k) => match binance_balance(&st.http, k).await {
@@ -389,6 +420,13 @@ async fn main() -> Result<()> {
 
     let binance = Keys::from_env("BINANCE");
     let bitget = Keys::from_env("BITGET");
+    for (name, k) in [("binance", &binance), ("bitget", &bitget)] {
+        if let Some(k) = k {
+            for problem in credential_problems(name, k) {
+                tracing::warn!("{name} 金鑰設定問題:{problem}");
+            }
+        }
+    }
     if binance.is_none() && bitget.is_none() {
         tracing::warn!("no API keys configured — /api/balance will return zeros. See .env.example");
     }
