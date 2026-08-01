@@ -109,7 +109,9 @@ if (-not $browser -or -not (Test-Path $browser)) {
 
 if ($browser) {
     Info "開啟儀表板(Brave)…"
-    Start-Process -FilePath $browser -ArgumentList $dash
+    # The project path contains spaces. Passing it unquoted makes the browser
+    # treat each fragment as a separate argument and it opens nothing.
+    Start-Process -FilePath $browser -ArgumentList "`"$dash`""
 } else {
     Warn "找不到 Brave,改用系統預設程式開啟 .html。"
     Warn "若想固定用某個瀏覽器,設定環境變數 QT_BROWSER 指向它的 exe。"
