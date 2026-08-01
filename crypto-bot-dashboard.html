@@ -609,6 +609,9 @@ const S = {
     dualma:   { on:false, alloc:{BTC:true, ETH:true, SOL:true},
                 tf:{ m15:true, h4:true },
                 fast:5, slow:20, adxMin:22, volMult:1.2, useTrendFilter:true },
+    smc:      { on:false, alloc:{BTC:true, ETH:true, SOL:true},
+                tf:{ m15:false, h4:true },
+                sweepLookback:40, sweepWithin:12, zonePad:0.15 },
     turtle:   { on:false, alloc:{BTC:true, ETH:true, SOL:true},
                 tf:{ m15:false, h4:true },
                 system:1, entryN:20, exitN:10, entryN2:55, exitN2:20,
@@ -1536,6 +1539,151 @@ function evalRsi2(asset, tfKey){
 }
 
 /* ---------------------------------------------------------------- *
+ * 7e. STRATEGY 6 — SMC 聰明錢概念 Smart Money Concepts
+ * ------------------------------------------------------------------
+ * The retail SMC framework, implemented to its usual published definitions:
+ *
+ *   Liquidity sweep — price pushes beyond a prior swing, triggers the stops
+ *     resting there, and REVERSES. A clean break that keeps going is a
+ *     breakout, not a sweep, so the close must come back inside.
+ *   BOS  — break of structure in the trend direction (continuation).
+ *   CHoCH— first break against the trend (possible reversal).
+ *   Order block — the last opposing candle before the impulsive move that
+ *     broke structure.
+ *   FVG  — three-candle imbalance: the gap between candle 1's high and
+ *     candle 3's low (bullish), left unfilled by the middle candle.
+ *
+ * Entry waits for price to retrace into the order block or the FVG, stop sits
+ * beyond the sweep extreme (where the idea is wrong), target is the opposite
+ * liquidity pool.
+ *
+ * HONESTY NOTE: unlike the long-MA trend filter, SMC has no peer-reviewed
+ * evidence base. It is a narrative layered on support/resistance and order
+ * flow, popularised through retail education rather than published research.
+ * It is implemented faithfully here so it can be measured — treat the
+ * backtest, not the narrative, as the evidence.
+ * ---------------------------------------------------------------- */
+
+/** Three-candle imbalance ending at index i. Returns the unfilled gap. */
+function findFVG(bars, i, dir){
+  if (i < 2) return null;
+  const a = bars[i-2], c = bars[i];
+  if (dir === "UP" && c.l > a.h)  return { lo:a.h, hi:c.l };   // gap left below
+  if (dir === "DOWN" && c.h < a.l) return { lo:c.h, hi:a.l };  // gap left above
+  return null;
+}
+
+/** Last opposing candle before the impulse that broke structure. */
+function findOrderBlock(bars, from, to, dir){
+  for (let i = to; i >= Math.max(1, from); i--){
+    const b = bars[i];
+    const opposing = dir === "UP" ? b.c < b.o : b.c > b.o;
+    if (opposing) return { lo: Math.min(b.o, b.c, b.l), hi: Math.max(b.o, b.c, b.h), i };
+  }
+  return null;
+}
+
+function evalSmc(asset, tfKey){
+  const m = S.mkt[asset], I = m.tf[tfKey], C = S.strat.smc;
+  if (!I || !I.bars || I.bars.length < 80) return { checks:[], ok:false, tfKey };
+  const bars = I.bars, n = bars.length, label = TF[tfKey].label;
+  const st = I.st;
+  const checks = [];
+
+  // --- 1. bias from market structure -------------------------------------
+  const dir = st.dir !== "NONE" ? st.dir : I.stage.dir;
+  if (dir === "NONE"){
+    checks.push({ k:"市場結構", ok:false, v:"無明確結構,不交易" });
+    return { checks, ok:false, tf:label, tfKey };
+  }
+  const side = dir === "UP" ? "LONG" : "SHORT";
+  checks.push({ k:"市場結構", ok:true,
+    v:`${dir === "UP" ? "上升(找多)" : "下降(找空)"} · ${st.run} 個同向標籤` });
+
+  // --- 2. liquidity sweep: took the stops, then closed back inside --------
+  const lookback = Math.min(C.sweepLookback, n - 3);
+  const priorLow  = st.lastL ? st.lastL.p : Math.min(...bars.slice(-lookback, -1).map(b=>b.l));
+  const priorHigh = st.lastH ? st.lastH.p : Math.max(...bars.slice(-lookback, -1).map(b=>b.h));
+
+  let sweep = null;
+  for (let i = n - 2; i >= Math.max(2, n - C.sweepWithin); i--){
+    const b = bars[i];
+    if (dir === "UP" && b.l < priorLow && b.c > priorLow){
+      sweep = { i, level: priorLow, extreme: b.l }; break;
+    }
+    if (dir === "DOWN" && b.h > priorHigh && b.c < priorHigh){
+      sweep = { i, level: priorHigh, extreme: b.h }; break;
+    }
+  }
+  checks.push({ k:"流動性掃蕩", ok:!!sweep,
+    v: sweep
+      ? `第 ${n-1-sweep.i} 根前掃過 ${fmt(sweep.level,2)} 後收回`
+      : `近 ${C.sweepWithin} 根內未見掃蕩後收回(單純突破不算)` });
+  if (!sweep) return { checks, ok:false, side, dir, tf:label, tfKey };
+
+  // --- 3. BOS after the sweep: structure actually shifted back ------------
+  const after = bars.slice(sweep.i + 1);
+  const bos = dir === "UP"
+    ? after.some(b => b.c > priorHigh)
+    : after.some(b => b.c < priorLow);
+  checks.push({ k:"結構突破 BOS", ok:bos,
+    v: bos ? `掃蕩後已突破 ${fmt(dir === "UP" ? priorHigh : priorLow, 2)}`
+           : "掃蕩後尚未突破結構 — 等待確認" });
+  if (!bos) return { checks, ok:false, side, dir, tf:label, tfKey };
+
+  // --- 4. order block / FVG as the entry zone ----------------------------
+  const ob = findOrderBlock(bars, sweep.i, n - 2, dir);
+  let fvg = null;
+  for (let i = sweep.i + 2; i <= n - 2; i++){
+    const g = findFVG(bars, i, dir);
+    if (g){ fvg = g; break; }
+  }
+  const zone = ob || (fvg ? { lo:fvg.lo, hi:fvg.hi } : null);
+  checks.push({ k:"進場區", ok:!!zone,
+    v: ob ? `訂單塊 ${fmt(ob.lo,2)} ~ ${fmt(ob.hi,2)}`
+       : fvg ? `價值缺口 ${fmt(fvg.lo,2)} ~ ${fmt(fvg.hi,2)}`
+       : "找不到訂單塊或價值缺口" });
+  if (!zone) return { checks, ok:false, side, dir, tf:label, tfKey };
+
+  // --- 5. price must have retraced INTO the zone -------------------------
+  const px = m.last;
+  const pad = (zone.hi - zone.lo) * C.zonePad;
+  const inZone = px >= zone.lo - pad && px <= zone.hi + pad;
+  checks.push({ k:"回撤到位", ok:inZone,
+    v: inZone ? `現價 ${fmt(px,2)} 已進入區間`
+              : `現價 ${fmt(px,2)} 尚未回到 ${fmt(zone.lo,2)} ~ ${fmt(zone.hi,2)}` });
+  if (!inZone) return { checks, ok:false, side, dir, tf:label, tfKey };
+
+  // --- 6. risk: stop beyond the sweep extreme, target the opposite pool ---
+  const a = atr(bars.slice(0, n - 1), 14);
+  if (!(a > 0)) return { checks, ok:false, side, dir, tf:label, tfKey };
+  const entry = px;
+  const invalid = dir === "UP" ? Math.min(sweep.extreme, zone.lo) : Math.max(sweep.extreme, zone.hi);
+  let slDist = Math.abs(entry - invalid) + 0.1 * a;
+  if (slDist < CFG.slAtrMult * a) slDist = CFG.slAtrMult * a;   // never tighter than the ATR floor
+  const sl = dir === "UP" ? entry - slDist : entry + slDist;
+  const pool = dir === "UP" ? priorHigh : priorLow;
+  let tp = dir === "UP" ? Math.max(pool, entry + slDist * CFG.minRR)
+                        : Math.min(pool, entry - slDist * CFG.minRR);
+  const rr = Math.abs(tp - entry) / slDist;
+  if (rr < CFG.minRR){
+    checks.push({ k:"盈虧比", ok:false, v:`1:${rr.toFixed(2)} < 1:${CFG.minRR}` });
+    return { checks, ok:false, side, dir, tf:label, tfKey };
+  }
+  checks.push({ k:"盈虧比", ok:true,
+    v:`1:${rr.toFixed(2)} · 停損放在掃蕩低點外 ${fmt(sl,2)}` });
+
+  const sizing = sizePosition(sizingEquity(), slDist, entry, asset);
+  if (!sizing.ok){ checks.push({k:"倉位",ok:false,v:sizing.why});
+                   return { checks, ok:false, side, dir, tf:label, tfKey }; }
+  checks.push({ k:"倉位", ok:true, v:`${sizing.qty.toFixed(4)} ${asset}` });
+
+  return { checks, ok:true, side, dir, tf:label, tfKey,
+           plan:{ entry, sl, tp, rr, slDist, ...sizing },
+           trigger:`SMC ${ob?"訂單塊":"價值缺口"}回撤 ${label}` };
+}
+
+/* ---------------------------------------------------------------- *
  * 8. POSITION SIZING  (GATE 5 / Risk Control Center)
  * ---------------------------------------------------------------- */
 /** Volatility targeting.
@@ -1667,7 +1815,7 @@ function checkBreakers(){
 /** Every strategy the engine can run. Anything that enables or disables
  *  strategies in bulk MUST iterate this — enumerating a subset by hand is how
  *  "stop all strategies" ended up leaving three of them trading. */
-const STRAT_KEYS = ["playbook", "dualma", "macd", "turtle", "rsi2"];
+const STRAT_KEYS = ["playbook", "dualma", "macd", "turtle", "rsi2", "smc"];
 const anyStratOn = () => STRAT_KEYS.some(k => S.strat[k] && S.strat[k].on);
 const onStratCount = () => STRAT_KEYS.filter(k => S.strat[k] && S.strat[k].on).length;
 const setAllStrats = on => STRAT_KEYS.forEach(k => { if (S.strat[k]) S.strat[k].on = on; });
@@ -1808,7 +1956,7 @@ function unrealized(){
 /* ---------------------------------------------------------------- *
  * 11. ENGINE LOOP
  * ---------------------------------------------------------------- */
-let evalCache = { playbook:{}, dualma:{}, macd:{}, turtle:{}, rsi2:{} };
+let evalCache = { playbook:{}, dualma:{}, macd:{}, turtle:{}, rsi2:{}, smc:{} };
 
 function runEngine(){
   // In backtest mode the timeframes are built incrementally by btAnalyze().
@@ -1823,11 +1971,13 @@ function runEngine(){
     evalCache.macd[a]     = {};
     evalCache.turtle[a]   = {};
     evalCache.rsi2[a]     = {};
+    evalCache.smc[a]      = {};
     DUALMA_TFS.forEach(k => {
       evalCache.dualma[a][k] = evalDualMA(a, k);
       evalCache.macd[a][k]   = evalMacd(a, k);
       evalCache.turtle[a][k] = evalTurtle(a, k);
       evalCache.rsi2[a][k]   = evalRsi2(a, k);
+      evalCache.smc[a][k]    = evalSmc(a, k);
     });
   });
 
@@ -1875,6 +2025,13 @@ function runEngine(){
           if (!S.strat.rsi2.tf[k]) continue;
           const sig = evalCache.rsi2[a] && evalCache.rsi2[a][k];
           if (sig && sig.ok){ openPosition(a, "RSI2", sig); return; }
+        }
+      }
+      if (S.strat.smc.on && S.strat.smc.alloc[a]){
+        for (const k of ["h4","m15"]){
+          if (!S.strat.smc.tf[k]) continue;
+          const sig = evalCache.smc[a] && evalCache.smc[a][k];
+          if (sig && sig.ok){ openPosition(a, "SMC", sig); return; }
         }
       }
     });
@@ -2481,6 +2638,8 @@ const STRATS = {
   turtle15: { label:"海龜交易法 · 15m",     exec:"m15", need:["15m"],      kind:"TURTLE",   tf:"15m" },
   rsi2_15:  { label:"RSI2 回歸 · 15m",      exec:"m15", need:["15m"],      kind:"RSI2",     tf:"15m" },
   rsi2_4h:  { label:"RSI2 回歸 · 4H",       exec:"h4",  need:["4h"],       kind:"RSI2",     tf:"4H" },
+  smc4h:    { label:"SMC 聰明錢 · 4H",      exec:"h4",  need:["4h"],       kind:"SMC",      tf:"4H" },
+  smc15:    { label:"SMC 聰明錢 · 15m",     exec:"m15", need:["15m"],      kind:"SMC",      tf:"15m" },
 };
 const IV_TF = { "15m":"m15", "1h":"h1", "4h":"h4", "1d":"d1", "1w":"w1" };
 
@@ -2567,6 +2726,8 @@ async function startRealBacktest(){
                alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])) },
       rsi2:{ ...live.strat.rsi2, on:cfg.strats.some(k=>k.startsWith("rsi2")),
              alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])) },
+      smc:{ ...live.strat.smc, on:cfg.strats.some(k=>k.startsWith("smc")),
+            alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])) },
       macd:{ on:cfg.strats.some(k=>k.startsWith("macd")),
              alloc:Object.fromEntries(ASSETS.map(a=>[a, cfg.assets.includes(a)])),
              tf:{ m15:cfg.strats.includes("macd15"), h4:cfg.strats.includes("macd4h") },
@@ -2744,6 +2905,9 @@ function rbtSignals(cfg, W, T, execTFs, fine){
       } else if (meta.kind === "RSI2"){
         if (!w.tf[meta.exec]) continue;
         sig = evalRsi2(a, meta.exec);
+      } else if (meta.kind === "SMC"){
+        if (!w.tf[meta.exec]) continue;
+        sig = evalSmc(a, meta.exec);
       } else {
         const k = meta.exec;
         if (!w.tf[k]) continue;
@@ -2849,6 +3013,11 @@ function cfgSnapshot(){
                   slow: S.strat.dualma.slow, adx_min: S.strat.dualma.adxMin,
                   vol_mult: S.strat.dualma.volMult,
                   use_trend_filter: S.strat.dualma.useTrendFilter },
+      smc:      { on: S.strat.smc.on, alloc: Object.assign({}, S.strat.smc.alloc),
+                  tf: Object.assign({}, S.strat.smc.tf),
+                  sweep_lookback: S.strat.smc.sweepLookback,
+                  sweep_within: S.strat.smc.sweepWithin,
+                  zone_pad: S.strat.smc.zonePad },
       turtle:   { on: S.strat.turtle.on, alloc: Object.assign({}, S.strat.turtle.alloc),
                   tf: Object.assign({}, S.strat.turtle.tf), system: S.strat.turtle.system,
                   entry_n: S.strat.turtle.entryN, exit_n: S.strat.turtle.exitN,
@@ -2897,6 +3066,14 @@ function cfgApply(c){
     if (typeof d.adx_min === "number") S.strat.dualma.adxMin = d.adx_min;
     if (typeof d.vol_mult === "number") S.strat.dualma.volMult = d.vol_mult;
     if (typeof d.use_trend_filter === "boolean") S.strat.dualma.useTrendFilter = d.use_trend_filter;
+  }
+  if (st.smc){
+    const sm = st.smc;
+    S.strat.smc.on = !!sm.on;
+    if (sm.alloc) Object.assign(S.strat.smc.alloc, sm.alloc);
+    if (sm.tf) Object.assign(S.strat.smc.tf, sm.tf);
+    const smm = { sweepLookback:"sweep_lookback", sweepWithin:"sweep_within", zonePad:"zone_pad" };
+    Object.keys(smm).forEach(k => { if (typeof sm[smm[k]] === "number") S.strat.smc[k] = sm[smm[k]]; });
   }
   if (st.turtle){
     const t2 = st.turtle;
@@ -3314,10 +3491,10 @@ function botStatus(){
   if (blocker === null)
     return { k:"bad", ic:"●", a:"實盤下單執行中 — 使用真實資金",
              b:`執行中:<b>${STRAT_KEYS.filter(k=>S.strat[k]&&S.strat[k].on)
-                  .map(k=>({playbook:"七關",dualma:"雙均線",macd:"MACD",turtle:"海龜",rsi2:"RSI2"})[k])
+                  .map(k=>({playbook:"七關",dualma:"雙均線",macd:"MACD",turtle:"海龜",rsi2:"RSI2",smc:"SMC"})[k])
                   .join("、")}</b>(${nSt} 個),單筆名目上限 ${usd(BE.maxNotional,0)}。委託會真的送到交易所。`,
              act:`<button class="btn red" data-action="panic">立即停止實盤</button>` };
-  const ZH = { playbook:"七關", dualma:"雙均線", macd:"MACD", turtle:"海龜", rsi2:"RSI2" };
+  const ZH = { playbook:"七關", dualma:"雙均線", macd:"MACD", turtle:"海龜", rsi2:"RSI2", smc:"SMC" };
   const names = STRAT_KEYS.filter(k => S.strat[k] && S.strat[k].on).map(k => ZH[k]).join("、");
   return { k:"on", ic:"●", a:"機器人執行中(模擬)",
            b:`執行中:<b>${names}</b>(${nSt} 個),20× 逐倉。`
@@ -4118,6 +4295,26 @@ V.setup = {
           </div>
           <div class="stratrow">
             <div class="info">
+              <div class="a">SMC 聰明錢概念
+                ${DUALMA_TFS.filter(k=>S.strat.smc.tf[k]).map(k=>
+                  `<span class="chip ${k==="m15"?"b":"v"}">${TF[k].label}</span>`).join("")}</div>
+              <div class="b">跟隨結構方向,等待<b>流動性掃蕩</b>(掃過前低後收回,單純突破不算)、
+                <b>結構突破 BOS</b> 確認,再等價格回撤到<b>訂單塊</b>或<b>價值缺口</b>進場。
+                停損放在掃蕩極值外,目標是對面的流動性池。
+                <span class="t4">註:SMC 屬零售教學框架,無同行審查文獻支持 —— 以回測為準,不要信敘事。</span></div>
+            </div>
+            <div class="pick">
+              ${ASSETS.map(a=>`<button class="btn sm ${S.strat.smc.alloc[a]?"grn":""}"
+                data-action="alloc" data-s="smc" data-a="${a}">${a}</button>`).join("")}
+              ${DUALMA_TFS.map(k=>`<button class="btn sm ${S.strat.smc.tf[k]?"pri":""}"
+                data-action="strat-tf" data-s="smc" data-k="${k}">${TF[k].label}</button>`).join("")}
+            </div>
+            <label class="sw"><input type="checkbox" data-action="strat-toggle" data-s="smc"
+              ${S.strat.smc.on?"checked":""}><span class="tr"></span></label>
+          </div>
+
+          <div class="stratrow">
+            <div class="info">
               <div class="a">海龜交易法
                 <span class="chip a">系統 ${S.strat.turtle.system}</span>
                 ${DUALMA_TFS.filter(k=>S.strat.turtle.tf[k]).map(k=>
@@ -4913,11 +5110,13 @@ function boot(){
     evalCache.macd[a] = {};
     evalCache.turtle[a] = {};
     evalCache.rsi2[a] = {};
+    evalCache.smc[a] = {};
     DUALMA_TFS.forEach(k => {
       evalCache.dualma[a][k] = evalDualMA(a, k);
       evalCache.macd[a][k]   = evalMacd(a, k);
       evalCache.turtle[a][k] = evalTurtle(a, k);
       evalCache.rsi2[a][k]   = evalRsi2(a, k);
+      evalCache.smc[a][k]    = evalSmc(a, k);
     });
   });
   S.equityCurve.push(S.acct.equity);

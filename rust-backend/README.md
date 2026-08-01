@@ -165,8 +165,6 @@ cargo run --release -- daemon
 Windows 背景執行:
 ```powershell
 Start-Process -WindowStyle Hidden ".\target\release\quant-terminal-backend.exe" -ArgumentList "daemon"
-elease\quant-terminal-backend.exe" -ArgumentList "daemon"
-elease\quant-terminal-backend.exe -ArgumentList "daemon"
 ```
 
 停止:`Ctrl-C`,或 `taskkill /F /IM quant-terminal-backend.exe`
