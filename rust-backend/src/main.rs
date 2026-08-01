@@ -101,26 +101,53 @@ struct BalanceReply {
     total_equity: f64,
 }
 
-/// Binance USDⓈ-M futures account. Read-only endpoint.
+/// Human-readable cause for the Binance error codes that actually bite.
+fn binance_hint(code: i64) -> &'static str {
+    match code {
+        -2015 => "金鑰無效、IP 未在白名單,或金鑰沒有開啟合約(Futures)權限 ——                   現貨金鑰讀不到 USDT-M 合約餘額,請在 Binance 金鑰設定勾選 Futures",
+        -2014 => "API 金鑰格式錯誤",
+        -1022 => "簽章驗證失敗 —— Secret 可能貼錯或含多餘空白",
+        -1021 => "時間戳超出 recvWindow —— 本機時鐘與交易所不同步,請校時",
+        -1099 => "找不到帳戶 —— 這組金鑰可能尚未開通合約帳戶",
+        _ => "",
+    }
+}
+
+/// Binance USDⓈ-M futures account. Read-only.
+/// Tries v3 first and falls back to v2, since Binance has been migrating
+/// these endpoints and which one answers depends on the account.
 async fn binance_balance(http: &reqwest::Client, k: &Keys) -> Result<VenueBalance> {
     let base = env::var("BINANCE_BASE")
         .unwrap_or_else(|_| "https://fapi.binance.com".into());
-    let query = format!("timestamp={}&recvWindow=5000", now_ms());
-    let sig = sign_hex(&k.secret, &query)?;
-    let url = format!("{base}/fapi/v2/account?{query}&signature={sig}");
 
-    let resp = http
-        .get(&url)
-        .header("X-MBX-APIKEY", &k.key)
-        .send()
-        .await
-        .context("binance request failed")?;
+    let mut last_err = String::new();
+    let mut body = serde_json::Value::Null;
+    let mut ok = false;
 
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.context("binance: bad JSON")?;
-    if !status.is_success() {
-        let msg = body.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown");
-        return Err(anyhow!("binance {}: {}", status.as_u16(), msg));
+    for path in ["/fapi/v3/account", "/fapi/v2/account"] {
+        let query = format!("timestamp={}&recvWindow=10000", now_ms());
+        let sig = sign_hex(&k.secret, &query)?;
+        let url = format!("{base}{path}?{query}&signature={sig}");
+        let resp = http.get(&url).header("X-MBX-APIKEY", &k.key).send().await
+            .context("binance request failed")?;
+        let status = resp.status();
+        let v: serde_json::Value = resp.json().await.context("binance: bad JSON")?;
+        if status.is_success() {
+            body = v; ok = true; break;
+        }
+        let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+        let msg = v.get("msg").and_then(|m| m.as_str()).unwrap_or("unknown");
+        let hint = binance_hint(code);
+        last_err = if hint.is_empty() {
+            format!("binance {} ({}): {}", status.as_u16(), code, msg)
+        } else {
+            format!("binance {} ({}): {} — {}", status.as_u16(), code, msg, hint)
+        };
+        // A permission or signature problem will fail identically on v2.
+        if code == -2015 || code == -1022 || code == -2014 { break; }
+    }
+    if !ok {
+        return Err(anyhow!("{last_err}"));
     }
 
     let f = |k: &str| body.get(k).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
@@ -246,6 +273,54 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Health> {
 
 #[derive(serde::Deserialize)]
 struct CloseReq { venue: String, symbol: String }
+
+async fn get_diag(State(st): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let mut out = serde_json::json!({});
+
+    // Clock skew is a top cause of -1021 and is invisible without checking.
+    let base = env::var("BINANCE_BASE")
+        .unwrap_or_else(|_| "https://fapi.binance.com".into());
+    let local = now_ms() as i64;
+    match st.http.get(format!("{base}/fapi/v1/time")).send().await {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(v) => {
+                let server = v.get("serverTime").and_then(|t| t.as_i64()).unwrap_or(0);
+                let skew = local - server;
+                out["clock"] = serde_json::json!({
+                    "local_ms": local, "exchange_ms": server, "skew_ms": skew,
+                    "ok": skew.abs() < 5000,
+                    "note": if skew.abs() >= 5000 {
+                        "時鐘偏移超過 5 秒,簽章會被拒絕 —— 請校正系統時間"
+                    } else { "時鐘同步正常" }
+                });
+            }
+            Err(e) => out["clock"] = serde_json::json!({"error": e.to_string()}),
+        },
+        Err(e) => out["clock"] = serde_json::json!({"error": e.to_string()}),
+    }
+
+    out["binance"] = match &st.binance {
+        None => serde_json::json!({"configured": false}),
+        Some(k) => match binance_balance(&st.http, k).await {
+            Ok(b) => serde_json::json!({
+                "configured": true, "ok": true,
+                "wallet": b.balance, "equity": b.equity, "available": b.available }),
+            Err(e) => serde_json::json!({
+                "configured": true, "ok": false, "error": e.to_string() }),
+        },
+    };
+    out["bitget"] = match &st.bitget {
+        None => serde_json::json!({"configured": false}),
+        Some(k) => match bitget_balance(&st.http, k).await {
+            Ok(b) => serde_json::json!({"configured": true, "ok": true, "equity": b.equity}),
+            Err(e) => serde_json::json!({"configured": true, "ok": false, "error": e.to_string()}),
+        },
+    };
+    out["endpoint"] = serde_json::json!(base);
+    out["live_trading"] = serde_json::json!(trade::live_enabled());
+    out["dry_run"] = serde_json::json!(trade::dry_run());
+    Json(out)
+}
 
 async fn get_env() -> (StatusCode, Json<serde_json::Value>) {
     match envcfg::read_view() {
@@ -423,6 +498,7 @@ async fn main() -> Result<()> {
         .route("/api/order", axum::routing::post(post_order))
         .route("/api/close", axum::routing::post(post_close))
         .route("/api/env", get(get_env).post(post_env))
+        .route("/api/diag", get(get_diag))
         .with_state(state)
         .layer(cors);
 

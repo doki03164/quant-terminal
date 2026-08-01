@@ -583,6 +583,7 @@ const S = {
   btSrc: "real",                // 回測資料來源:real | sim
   paused: false,                // true while a backtest owns the world
   btMode: false,                // true while running inside the backtest engine
+  liveOrders: false,            // dashboard may send real orders (off by default)
   booted: Date.now(),
   engine: "IDLE",              // IDLE | RUNNING | HALTED | KILLED
   killed: false,
@@ -1688,7 +1689,10 @@ function openPosition(asset, strat, sig){
   };
   S.acct.fees += pos.feePaid;
   S.acct.realized -= pos.feePaid;
+  pos.real = false;
   S.positions.push(pos);
+  // Route to the exchange when everything upstream is actually armed.
+  if (!S.btMode && realOrderBlocker() === null) submitRealOrder(pos);
   S.breaker.tradesToday++;
   S.orders.unshift({ t:Date.now(), id:pos.id, asset, ex, side:sig.side,
                      type:"MARKET", qty:p.qty, px:p.entry, status:"FILLED", strat });
@@ -1709,6 +1713,7 @@ function closePosition(pos, reason, priceOverride){
 
   S.acct.realized += net;
   S.acct.fees += exitFee;
+  if (pos.real && !S.btMode) submitRealClose(pos);
   S.positions = S.positions.filter(p => p.id !== pos.id);
   const rec = { ...pos, exit:px, pnl:net, reason, closed:Date.now(),
                 r: net / pos.riskAmt };
@@ -3097,6 +3102,75 @@ function syncExchangesFromBackend(){
   return changed;
 }
 
+/** Can the dashboard place a real order right now, and if not, why not?
+ *  Returned as a reason string so the UI can say what is missing instead of
+ *  quietly simulating and looking like it traded. */
+function realOrderBlocker(){
+  if (!S.liveOrders) return "儀表板下單未啟用";
+  if (!BE.up)        return "後端未連線";
+  if (!BE.trading)   return "後端 LIVE_TRADING=false";
+  if (BE.dryRun)     return "後端 DRY_RUN=true(只簽章不送出)";
+  if (!BE.binanceConfigured && !BE.bitgetConfigured) return "後端沒有任何交易所金鑰";
+  return null;
+}
+
+/** Send a real order for a position the engine just opened.
+ *  The local position is created first so the UI stays responsive, then
+ *  reconciled: if the exchange refuses, the position is removed rather than
+ *  left on screen pretending to exist. */
+async function submitRealOrder(pos){
+  const sym = (RBT_SYM && RBT_SYM[pos.asset]) || (pos.asset + "USDT");
+  const body = {
+    venue: pos.ex, symbol: sym, side: pos.side,
+    qty: pos.qty, entry: pos.entry, stop: pos.sl, take_profit: pos.tp,
+  };
+  try {
+    const r = await fetch(`${BE.url}/api/order`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (j.ok && !j.dry_run){
+      pos.real = true;
+      pos.exchangeOrderId = j.exchange_order_id || null;
+      log("EXEC", `真實委託已送出 — ${sym} ${pos.side} #${pos.exchangeOrderId || "?"}`);
+      toast(`<b>真實委託已成交</b><br><span style="font-family:var(--mono);font-size:11px">`
+          + `${sym} ${pos.side} ${pos.qty.toFixed(4)}</span>`, "g", 8000);
+    } else if (j.ok && j.dry_run){
+      pos.real = false; pos.dryRun = true;
+      log("WARN", `${sym} 乾跑 — 委託已驗證但未送出`);
+    } else {
+      // The exchange said no. Do not keep a position that does not exist.
+      S.positions = S.positions.filter(x => x.id !== pos.id);
+      log("ERR", `真實委託被拒 — ${sym}:${j.error || "未知錯誤"}(本地部位已移除)`);
+      toast(`<b>真實委託被拒</b><br><span style="font-size:11.5px">${esc(j.error||"未知錯誤")}</span>`,
+            "r", 10000);
+    }
+  } catch(e){
+    S.positions = S.positions.filter(x => x.id !== pos.id);
+    log("ERR", `送出委託失敗 — ${String(e.message||e)}(本地部位已移除)`);
+    toast(`<b>送出委託失敗</b><br><span style="font-size:11.5px">${esc(String(e.message||e))}</span>`,
+          "r", 9000);
+  }
+  repaint();
+}
+
+/** Close a real position on the exchange as well as locally. */
+async function submitRealClose(pos){
+  const sym = (RBT_SYM && RBT_SYM[pos.asset]) || (pos.asset + "USDT");
+  try {
+    const r = await fetch(`${BE.url}/api/close`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ venue: pos.ex, symbol: sym }),
+    });
+    const j = await r.json();
+    if (j.ok) log("EXEC", `交易所已平倉 — ${sym}`);
+    else log("ERR", `交易所平倉失敗 — ${sym}:${j.error || "未知"}`);
+  } catch(e){
+    log("ERR", `交易所平倉失敗 — ${String(e.message||e)}`);
+  }
+}
+
 /* ------------------------------ 主控台 CONSOLE ------------------ */
 /* One operating screen: is it running, what is my money doing, what is
    open, stop it. Everything diagnostic lives behind a disclosure. */
@@ -3132,8 +3206,14 @@ function botStatus(){
     return { k:"warn", ic:"◐", a:"今日已達交易上限",
              b:`已開 ${S.breaker.tradesToday} 筆(上限 ${CFG.breakers.maxTradesDay} 筆)。持倉照常管理,不再開新倉。`,
              act:"" };
-  return { k:"on", ic:"●", a:"機器人執行中",
-           b:`監控 BTC · ETH · SOL,${nSt} 個策略運行中,20× 逐倉。符合條件才會自動進場。`,
+  const blocker = realOrderBlocker();
+  if (blocker === null)
+    return { k:"bad", ic:"●", a:"實盤下單執行中 — 使用真實資金",
+             b:`${nSt} 個策略運行中,單筆名目上限 ${usd(BE.maxNotional,0)}。委託會真的送到交易所。`,
+             act:`<button class="btn red" data-action="panic">立即停止實盤</button>` };
+  return { k:"on", ic:"●", a:"機器人執行中(模擬)",
+           b:`${nSt} 個策略運行中,20× 逐倉。`
+            + `<b>不會送出真實委託</b> — ${blocker}。`,
            act:`<button class="btn sm" data-action="stop-all">暫停策略</button>` };
 }
 
@@ -4042,6 +4122,25 @@ V.setup = {
       </div>
 
       <div class="block">
+        <div class="bh"><span class="n">4.5 · 實盤下單</span>
+          <span class="d">讓儀表板把訊號送到交易所</span></div>
+        <div class="panel"><div class="pb">
+          <div class="swrow" style="padding-top:0">
+            <div class="txt"><div class="a">儀表板送出真實委託
+              ${S.liveOrders?'<span class="chip r">已啟用</span>':'<span class="chip n">關閉</span>'}</div>
+              <div class="b">關閉時,策略只在本機模擬。開啟後仍需後端三道鎖全部放行才會真的下單。</div></div>
+            <label class="sw"><input type="checkbox" data-action="live-orders"
+              ${S.liveOrders?"checked":""}><span class="tr"></span></label>
+          </div>
+          <div id="lo-status"></div>
+          <div class="note bad" style="margin-top:10px;font-size:11.5px">
+            <b>不要同時執行 daemon 和儀表板下單</b> —— 兩邊會對同一個訊號各下一次單,
+            結果是雙倍部位、雙倍風險。擇一使用。
+          </div>
+        </div></div>
+      </div>
+
+      <div class="block">
         <div class="bh"><span class="n">5 · 後端設定(.env)</span>
           <span class="d">直接在這裡改,不用開檔案</span></div>
         <div class="panel"><div class="pb" id="env-editor"></div></div>
@@ -4110,6 +4209,17 @@ V.setup = {
     // The setup view refreshes on every heartbeat. Re-rendering the editor
     // would destroy the <input> the user is typing into and drop focus mid-key,
     // so only paint when the underlying state actually changed.
+    const lo = $("#lo-status");
+    if (lo){
+      const b = realOrderBlocker();
+      lo.innerHTML = b === null
+        ? `<div class="note bad" style="font-size:11.5px"><b>⚠ 目前會送出真實委託</b> —
+            後端已解除鎖定,單筆名目上限 ${usd(BE.maxNotional,0)}。</div>`
+        : `<div class="note info" style="font-size:11.5px">
+            目前<b>不會</b>送出真實委託 — ${esc(b)}。<br>
+            需要全部滿足:儀表板開關開啟 · 後端連線 · <code>LIVE_TRADING=true</code> ·
+            <code>DRY_RUN=false</code> · 至少一組交易所金鑰。</div>`;
+    }
     const ee = $("#env-editor");
     if (ee){
       const stamp = [BE.up, ENVED.loaded, ENVED.busy, ENVED.err, ENVED.rev || 0].join("|");
@@ -4313,6 +4423,27 @@ document.addEventListener("click", e => {
       ENVED.dirty[t.dataset.k] = t.dataset.v;
       ENVED.rev++;
       envSave();
+      break;
+    }
+
+    case "panic": {
+      confirmModal("立即停止實盤",
+        `將關閉儀表板下單、停用所有策略,並把後端的 <b>LIVE_TRADING</b> 設為 false。<br><br>
+         已開倉的部位<b>不會</b>自動平倉 —— 若要一併平掉,請按主控台的「全部平倉」。`,
+        "停止實盤", async () => {
+          S.liveOrders = false;
+          S.strat.playbook.on = S.strat.dualma.on = S.strat.macd.on = false;
+          S.strat.turtle.on = S.strat.rsi2.on = false;
+          try {
+            await fetch(`${BE.url}/api/env`, { method:"POST",
+              headers:{"Content-Type":"application/json"},
+              body: JSON.stringify({ values:{ LIVE_TRADING:"false" } }) });
+          } catch(e){}
+          await beHealth();
+          log("ERR","操作員按下停止實盤 — 儀表板下單關閉、策略停用、後端已解除武裝。");
+          toast("<b>實盤已停止。</b>","r",8000);
+          closeModal(); repaint();
+        });
       break;
     }
 
@@ -4537,6 +4668,14 @@ document.addEventListener("change", e => {
     computeIndicators(); repaint();
   }
   if (t.id === "cfg-file" && t.files && t.files[0]) cfgImportFile(t.files[0]);
+  if (A === "live-orders"){
+    S.liveOrders = t.checked;
+    log(t.checked?"ERR":"INFO",
+        t.checked ? "儀表板下單已啟用 — 條件符合時會送出真實委託。" : "儀表板下單已關閉。");
+    if (t.checked) toast("<b>儀表板下單已啟用</b><br><span style=\'font-size:11.5px\'>"
+        + "仍需後端 LIVE_TRADING=true 且 DRY_RUN=false 才會真的送出。</span>","r",9000);
+    switchView("setup");
+  }
   if (A === "live-toggle"){ liveToggle(t.checked); repaint(); }
   if (A === "ma-bool"){ S.strat.dualma[t.dataset.f] = t.checked; repaint(); }
   if (A === "calc"){ if (t.id==="rc-asset") syncCalc(); calcSizing(); }
